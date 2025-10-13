@@ -221,6 +221,7 @@ const votingMetricsManager = new MetricsManager<Record<string, MemberData>>(
 const distributionMetricsManager = new MetricsManager<DistributionMetrics>(
   {
     reserveBalances: 0,
+    lockerBalances: 0,
     stakedSup: 0,
     lpSup: 0,
     streamingOut: 0,
@@ -1064,7 +1065,8 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
     
     // Initialize metrics with default values
     const metrics: DistributionMetrics = {
-      reserveBalances: 0,
+      reserveBalances: 0, // includes stakedSup and streamingOut
+      lockerBalances: 0,
       stakedSup: 0,
       lpSup: 0,
       streamingOut: 0,
@@ -1168,93 +1170,108 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
 
     console.log(`Found ${lockers.length} lockers`);
 
-    if (lockers.length > 0) {
-      // Batch contract calls to get locker data
-      console.log('Fetching locker balances and staked amounts...');
-      const batchSize = 100;
-      let totalReserveBalances = BigInt(0);
-      let totalStakedSup = BigInt(0);
-      let totalLpSup = BigInt(0);
+    const batchSize = 100;
+    // SUP in lockers (unstaked)
+    let totalLockerSup = BigInt(0);
+    // staked SUP
+    let totalStakedSup = BigInt(0);
+    // (claim on) SUP in LP positions
+    let totalLpSup = BigInt(0);
 
-      for (let i = 0; i < lockers.length; i += batchSize) {
-        const batch = lockers.slice(i, i + batchSize);
-        console.log(`Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(lockers.length / batchSize)}`);
-        
-        const balancePromises = batch.map(lockerAddress => 
-          viemClient.readContract({
-            address: lockerAddress as Address,
-            abi: LOCKER_ABI,
-            functionName: 'getAvailableBalance',
-            args: []
-          }).catch(error => {
-            console.debug(`Error fetching available balance for locker ${lockerAddress}: ${error.message}`);
-            return BigInt(0);
-          })
-        );
+    for (let i = 0; i < lockers.length; i += batchSize) {
+      const batch = lockers.slice(i, i + batchSize);
+      console.log(`Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(lockers.length / batchSize)}`);
 
-        const stakedPromises = batch.map(lockerAddress =>
-          viemClient.readContract({
-            address: lockerAddress as Address,
-            abi: LOCKER_ABI,
-            functionName: 'getStakedBalance',
-            args: []
-          }).catch(error => {
-            console.debug(`Error fetching staked balance for locker ${lockerAddress}: ${error.message}`);
-            return BigInt(0);
-          })
-        );
+      // Fetch locker balances
+      //console.log('Fetching locker availableBalances and staked amounts...');
+      const availableBalancePromises = batch.map(lockerAddress => 
+        viemClient.readContract({
+          address: lockerAddress as Address,
+          abi: LOCKER_ABI,
+          functionName: 'getAvailableBalance',
+          args: []
+        })
+      );
 
-        /*
-        const lpPromises = batch.map(lockerAddress => 
-          viemClient.readContract({
-            address: lockerAddress as Address,
-            abi: LOCKER_ABI,
-            functionName: 'getLiquidityBalance',
-            args: []
-          }).catch(error => {
-            console.debug(`Error fetching LP balance for locker ${lockerAddress}: ${error.message}`);
-            return BigInt(0);
-          })
-        );
-        */
-        // not yet available, we use a placeholder return 0 instead
-        const lpPromises = batch.map(_ => {
-          return BigInt(0);
-        });
+      const stakedBalancePromises = batch.map(lockerAddress =>
+        viemClient.readContract({
+          address: lockerAddress as Address,
+          abi: LOCKER_ABI,
+          functionName: 'getStakedBalance',
+          args: []
+        })
+      );
 
-        const [balances, stakedBalances, lpBalances] = await Promise.all([
-          Promise.all(balancePromises),
-          Promise.all(stakedPromises),
-          Promise.all(lpPromises)
-        ]);
+      // LP balance not yet available, use placeholder
+      const lpPromises = batch.map(_ => BigInt(0));
 
-        // Sum up the batch results
-        for (let j = 0; j < batch.length; j++) {
-          totalReserveBalances += balances[j] as bigint;
-          totalStakedSup += stakedBalances[j] as bigint;
-          totalLpSup += lpBalances[j];
-        }
-      }
+      const [availableBalances, stakedBalances, lpBalances] = await Promise.all([
+        Promise.all(availableBalancePromises),
+        Promise.all(stakedBalancePromises),
+        Promise.all(lpPromises)
+      ]);
 
-      metrics.reserveBalances = Number(totalReserveBalances / BigInt(10 ** 18));
-      metrics.stakedSup = Number(totalStakedSup / BigInt(10 ** 18));
-      metrics.lpSup = Number(totalLpSup / BigInt(10 ** 18));
+      // Sum up the batch results
+      totalLockerSup += availableBalances.reduce((sum, balance) => sum + (balance as bigint), BigInt(0));
+      totalStakedSup += stakedBalances.reduce((sum, balance) => sum + (balance as bigint), BigInt(0));
+      totalLpSup += lpBalances.reduce((sum, balance) => sum + (balance as bigint), BigInt(0));
+
     }
 
-    // Calculate streaming out (placeholder - would need fountain subgraph data)
-    console.log('Calculating streaming out...');
-    // This would require querying the fountain subgraph for active streams
-    // For now, set to 0
-    metrics.streamingOut = 0;
+    // Calculate streaming out by querying fontaines from sup_subgraph
+    console.log('Fetching fontaines...');
+    const fontaines = await queryAllPages(
+      (lastId) => `{
+        fontaines(
+          first: 1000,
+          where: { id_gt: "${lastId}" }
+          orderBy: id,
+          orderDirection: asc
+        ) {
+          id
+          locker {
+            id
+          }
+          recipient
+        }
+      }`,
+      (res) => res.data.data.fontaines,
+      (item) => item,
+      config.supSubgraphUrl
+    );
 
-    // Calculate "Other" as remainder
-    const accountedFor = metrics.reserveBalances + metrics.communityCharge + 
-                        metrics.investorsTeamLocked + metrics.daoTreasury + 
-                        metrics.foundationTreasury;
-    metrics.other = metrics.totalSupply - accountedFor;
+    console.log(`Found ${fontaines.length} fontaines`);
+
+    // Get SUP balance of each fontaine contract
+    console.log('Fetching SUP balances for fontaines...');
+    const fontaineBalancePromises = fontaines.map(fontaine => 
+      viemClient.readContract({
+        address: config.baseTokenAddress as Address,
+        abi: erc20Abi,
+        functionName: 'balanceOf',
+        args: [fontaine.id as Address]
+      })
+    );
+
+    const fontaineBalances = await Promise.all(fontaineBalancePromises);
+    
+    // Sum up all fontaine balances
+    const totalStreamingOut = fontaineBalances.reduce((sum, balance) => sum + (balance as bigint), BigInt(0));
+
+    metrics.lockerBalances = Number(totalLockerSup / BigInt(10 ** 18));
+    metrics.stakedSup = Number(totalStakedSup / BigInt(10 ** 18));
+    metrics.streamingOut = Number(totalStreamingOut / BigInt(10 ** 18));
+    metrics.lpSup = Number(totalLpSup / BigInt(10 ** 18));
+    metrics.reserveBalances = metrics.lockerBalances + metrics.stakedSup + metrics.streamingOut;
+
+    // Calculate "Other" as remainder (note that stakedSup and streamingOut are already included in reserveBalances)
+    metrics.other = metrics.totalSupply -
+      ( metrics.reserveBalances + metrics.lpSup + metrics.communityCharge + 
+      metrics.investorsTeamLocked + metrics.daoTreasury + metrics.foundationTreasury);
 
     console.log('Distribution metrics calculated:', {
       reserveBalances: metrics.reserveBalances,
+      lockerBalances: metrics.lockerBalances,
       stakedSup: metrics.stakedSup,
       lpSup: metrics.lpSup,
       streamingOut: metrics.streamingOut,
