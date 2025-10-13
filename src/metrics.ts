@@ -29,7 +29,6 @@ const viemClient = createPublicClient({
   chain: base,
   transport: http(config.baseRpcUrl, { 
     batch: {
-      batchSize: 100,
       wait: 100
     }
   }),
@@ -1171,6 +1170,7 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
 
     console.log(`Found ${lockers.length} lockers`);
 
+    const batchSize = 100;
     // SUP in lockers (unstaked)
     let totalLockerSup = BigInt(0);
     // staked SUP
@@ -1178,42 +1178,48 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
     // (claim on) SUP in LP positions
     let totalLpSup = BigInt(0);
 
-    // Fetch locker balances
-    console.log('Fetching locker availableBalances and staked amounts...');
-    const availableBalancePromises = lockers.map(lockerAddress => 
-      viemClient.readContract({
-        address: lockerAddress as Address,
-        abi: LOCKER_ABI,
-        functionName: 'getAvailableBalance',
-        args: []
-      })
-    );
+    for (let i = 0; i < lockers.length; i += batchSize) {
+      const batch = lockers.slice(i, i + batchSize);
+      console.log(`Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(lockers.length / batchSize)}`);
 
-    const stakedBalancePromises = lockers.map(lockerAddress =>
-      viemClient.readContract({
-        address: lockerAddress as Address,
-        abi: LOCKER_ABI,
-        functionName: 'getStakedBalance',
-        args: []
-      })
-    );
+      // Fetch locker balances
+      //console.log('Fetching locker availableBalances and staked amounts...');
+      const availableBalancePromises = batch.map(lockerAddress => 
+        viemClient.readContract({
+          address: lockerAddress as Address,
+          abi: LOCKER_ABI,
+          functionName: 'getAvailableBalance',
+          args: []
+        })
+      );
 
-    // LP balance not yet available, use placeholder
-    const lpPromises = lockers.map(_ => BigInt(0));
+      const stakedBalancePromises = batch.map(lockerAddress =>
+        viemClient.readContract({
+          address: lockerAddress as Address,
+          abi: LOCKER_ABI,
+          functionName: 'getStakedBalance',
+          args: []
+        })
+      );
 
-    const [availableBalances, stakedBalances, lpBalances] = await Promise.all([
-      Promise.all(availableBalancePromises),
-      Promise.all(stakedBalancePromises),
-      Promise.all(lpPromises)
-    ]);
+      // LP balance not yet available, use placeholder
+      const lpPromises = batch.map(_ => BigInt(0));
 
-    // Sum up all balances
-    totalLockerSup = availableBalances.reduce((sum, balance) => sum + (balance as bigint), BigInt(0));
-    totalStakedSup = stakedBalances.reduce((sum, balance) => sum + (balance as bigint), BigInt(0));
-    totalLpSup = lpBalances.reduce((sum, balance) => sum + balance, BigInt(0));
+      const [availableBalances, stakedBalances, lpBalances] = await Promise.all([
+        Promise.all(availableBalancePromises),
+        Promise.all(stakedBalancePromises),
+        Promise.all(lpPromises)
+      ]);
+
+      // Sum up the batch results
+      totalLockerSup += availableBalances.reduce((sum, balance) => sum + (balance as bigint), BigInt(0));
+      totalStakedSup += stakedBalances.reduce((sum, balance) => sum + (balance as bigint), BigInt(0));
+      totalLpSup += lpBalances.reduce((sum, balance) => sum + (balance as bigint), BigInt(0));
+
+    }
 
     // Calculate streaming out by querying fontaines from sup_subgraph
-    console.log('Calculating streaming out...');
+    console.log('Fetching fontaines...');
     const fontaines = await queryAllPages(
       (lastId) => `{
         fontaines(
@@ -1237,7 +1243,7 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
     console.log(`Found ${fontaines.length} fontaines`);
 
     // Get SUP balance of each fontaine contract
-    console.log('Fetching SUP valances for fontaines...');
+    console.log('Fetching SUP balances for fontaines...');
     const fontaineBalancePromises = fontaines.map(fontaine => 
       viemClient.readContract({
         address: config.baseTokenAddress as Address,
