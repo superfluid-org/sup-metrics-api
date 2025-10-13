@@ -222,6 +222,7 @@ const votingMetricsManager = new MetricsManager<Record<string, MemberData>>(
 const distributionMetricsManager = new MetricsManager<DistributionMetrics>(
   {
     reserveBalances: 0,
+    lockerBalances: 0,
     stakedSup: 0,
     lpSup: 0,
     streamingOut: 0,
@@ -1066,6 +1067,7 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
     // Initialize metrics with default values
     const metrics: DistributionMetrics = {
       reserveBalances: 0, // includes stakedSup and streamingOut
+      lockerBalances: 0,
       stakedSup: 0,
       lpSup: 0,
       streamingOut: 0,
@@ -1250,10 +1252,11 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
     // Sum up all fontaine balances
     const totalStreamingOut = fontaineBalances.reduce((sum, balance) => sum + (balance as bigint), BigInt(0));
 
+    metrics.lockerBalances = Number(totalLockerSup / BigInt(10 ** 18));
     metrics.stakedSup = Number(totalStakedSup / BigInt(10 ** 18));
     metrics.streamingOut = Number(totalStreamingOut / BigInt(10 ** 18));
     metrics.lpSup = Number(totalLpSup / BigInt(10 ** 18));
-    metrics.reserveBalances = Number(totalLockerSup / BigInt(10 ** 18)) + metrics.stakedSup + metrics.streamingOut;
+    metrics.reserveBalances = metrics.lockerBalances + metrics.stakedSup + metrics.streamingOut;
 
     // Calculate "Other" as remainder (note that stakedSup and streamingOut are already included in reserveBalances)
     metrics.other = metrics.totalSupply -
@@ -1262,6 +1265,7 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
 
     console.log('Distribution metrics calculated:', {
       reserveBalances: metrics.reserveBalances,
+      lockerBalances: metrics.lockerBalances,
       stakedSup: metrics.stakedSup,
       lpSup: metrics.lpSup,
       streamingOut: metrics.streamingOut,
