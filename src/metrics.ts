@@ -11,7 +11,8 @@ import {
   DaoMembersResponse,
   DistributionMetrics,
   DistributionMetricsResponse,
-  VestingSchedule
+  VestingSchedule,
+  LockerBreakdown
 } from './types'; 
 import snapshot from '@snapshot-labs/snapshot.js';
 import snapshotStrategies from '@d10r/snapshot-strategies';
@@ -22,7 +23,7 @@ import { LOCKER_ABI, SUP_VESTING_FACTORY_ABI } from './abis';
 
 // File paths for metric data
 const DATA_DIR = './data';
-const FILE_SCHEMA_VERSION = 3;
+const FILE_SCHEMA_VERSION = 4;
 
 // Setup viem client with batching support
 const viemClient = createPublicClient({
@@ -230,7 +231,8 @@ const distributionMetricsManager = new MetricsManager<DistributionMetrics>(
     daoTreasury: 0,
     foundationTreasury: 0,
     other: 0,
-    totalSupply: 1000000000 // 1B SUP tokens
+    totalSupply: 1000000000, // 1B SUP tokens
+    lockers: []
   },
   fetchDistributionMetrics,
   'distributionMetrics.json',
@@ -1075,7 +1077,8 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
       daoTreasury: 0,
       foundationTreasury: 0,
       other: 0,
-      totalSupply: 1000000000 // 1B SUP tokens
+      totalSupply: 1000000000, // 1B SUP tokens
+      lockers: []
     };
 
     // Get community charge (StakingRewardController balance)
@@ -1171,19 +1174,13 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
     console.log(`Found ${lockers.length} lockers`);
 
     const batchSize = 100;
-    // SUP in lockers (unstaked)
-    let totalLockerSup = BigInt(0);
-    // staked SUP
-    let totalStakedSup = BigInt(0);
-    // (claim on) SUP in LP positions
-    let totalLpSup = BigInt(0);
+    // Map locker address -> {owner, staked, lp, fontaines, available}
+    const lockerMap = new Map<string, {owner: string, staked: bigint, lp: bigint, fontaines: bigint, available: bigint}>();
 
     for (let i = 0; i < lockers.length; i += batchSize) {
       const batch = lockers.slice(i, i + batchSize);
       console.log(`Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(lockers.length / batchSize)}`);
 
-      // Fetch locker balances
-      //console.log('Fetching locker availableBalances and staked amounts...');
       const availableBalancePromises = batch.map(lockerAddress => 
         viemClient.readContract({
           address: lockerAddress as Address,
@@ -1202,20 +1199,35 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
         })
       );
 
+      const ownerPromises = batch.map(lockerAddress =>
+        viemClient.readContract({
+          address: lockerAddress as Address,
+          abi: LOCKER_ABI,
+          functionName: 'lockerOwner',
+          args: []
+        }).catch(() => null)
+      );
+
       // LP balance not yet available, use placeholder
       const lpPromises = batch.map(_ => BigInt(0));
 
-      const [availableBalances, stakedBalances, lpBalances] = await Promise.all([
+      const [availableBalances, stakedBalances, lpBalances, owners] = await Promise.all([
         Promise.all(availableBalancePromises),
         Promise.all(stakedBalancePromises),
-        Promise.all(lpPromises)
+        Promise.all(lpPromises),
+        Promise.all(ownerPromises)
       ]);
 
-      // Sum up the batch results
-      totalLockerSup += availableBalances.reduce((sum, balance) => sum + (balance as bigint), BigInt(0));
-      totalStakedSup += stakedBalances.reduce((sum, balance) => sum + (balance as bigint), BigInt(0));
-      totalLpSup += lpBalances.reduce((sum, balance) => sum + (balance as bigint), BigInt(0));
-
+      // Track per-locker data
+      batch.forEach((lockerAddress, idx) => {
+        lockerMap.set(lockerAddress.toLowerCase(), {
+          owner: owners[idx] ? (owners[idx] as Address).toLowerCase() : '',
+          staked: stakedBalances[idx] as bigint,
+          lp: lpBalances[idx] as bigint,
+          fontaines: BigInt(0),
+          available: availableBalances[idx] as bigint
+        });
+      });
     }
 
     // Calculate streaming out by querying fontaines from sup_subgraph
@@ -1255,19 +1267,53 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
 
     const fontaineBalances = await Promise.all(fontaineBalancePromises);
     
-    // Sum up all fontaine balances
-    const totalStreamingOut = fontaineBalances.reduce((sum, balance) => sum + (balance as bigint), BigInt(0));
+    // Map fontaine balances to lockers
+    fontaines.forEach((fontaine, idx) => {
+      const lockerId = fontaine.locker.id.toLowerCase();
+      const balance = fontaineBalances[idx] as bigint;
+      const locker = lockerMap.get(lockerId);
+      if (locker) {
+        locker.fontaines += balance;
+      } else {
+        throw new Error(`Fontaine ${fontaine.id} - owning locker ${lockerId} not found in lockerMap`);
+      }
+    });
 
-    metrics.lockerBalances = Number(totalLockerSup / BigInt(10 ** 18));
+    // Calculate totals and build per-locker breakdown
+    //let totalLockerSup = BigInt(0);
+    let totalAvailableSup = BigInt(0);
+    let totalStakedSup = BigInt(0);
+    let totalLpSup = BigInt(0);
+    let totalStreamingOut = BigInt(0);
+    const lockerBreakdowns: LockerBreakdown[] = [];
+
+    lockerMap.forEach((data, address) => {
+      const available = Number(data.available / BigInt(10 ** 18));
+      const staked = Number(data.staked / BigInt(10 ** 18));
+      const lp = Number(data.lp / BigInt(10 ** 18));
+      const fontaines = Number(data.fontaines / BigInt(10 ** 18));
+
+      totalAvailableSup += data.available;
+      totalStakedSup += data.staked;
+      totalLpSup += data.lp;
+      totalStreamingOut += data.fontaines;
+      lockerBreakdowns.push({ address, owner: data.owner, available, staked, lp, fontaines });
+    });
+
+    metrics.lockerBalances = Number(totalAvailableSup / BigInt(10 ** 18));
     metrics.stakedSup = Number(totalStakedSup / BigInt(10 ** 18));
     metrics.streamingOut = Number(totalStreamingOut / BigInt(10 ** 18));
     metrics.lpSup = Number(totalLpSup / BigInt(10 ** 18));
-    metrics.reserveBalances = metrics.lockerBalances + metrics.stakedSup + metrics.streamingOut;
+
+    metrics.reserveBalances = metrics.lockerBalances + metrics.stakedSup + metrics.lpSup + metrics.streamingOut;
 
     // Calculate "Other" as remainder (note that stakedSup and streamingOut are already included in reserveBalances)
     metrics.other = metrics.totalSupply -
       ( metrics.reserveBalances + metrics.lpSup + metrics.communityCharge + 
       metrics.investorsTeamLocked + metrics.daoTreasury + metrics.foundationTreasury);
+
+    // Add per-locker breakdown
+    metrics.lockers = lockerBreakdowns;
 
     console.log('Distribution metrics calculated:', {
       reserveBalances: metrics.reserveBalances,
@@ -1280,7 +1326,8 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
       daoTreasury: metrics.daoTreasury,
       foundationTreasury: metrics.foundationTreasury,
       other: metrics.other,
-      totalSupply: metrics.totalSupply
+      totalSupply: metrics.totalSupply,
+      lockers: metrics.lockers.length
     });
 
     return metrics;

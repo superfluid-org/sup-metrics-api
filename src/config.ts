@@ -40,3 +40,5 @@ export const config = {
   distributionMetricsUpdateInterval: parseInt(process.env.DISTRIBUTION_METRICS_UPDATE_INTERVAL || '86400', 10),
   vpCalcChunkSize: parseInt(process.env.VP_CALC_CHUNK_SIZE || '5000', 10),
 }; 
+
+export type AppConfig = typeof config;

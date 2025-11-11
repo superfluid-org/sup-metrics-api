@@ -107,13 +107,22 @@ export interface DaoMembersResponse {
   lastUpdatedAt: number;
 }
 
+export interface LockerBreakdown {
+  address: string;
+  owner: string;
+  available: number;
+  staked: number;
+  lp: number;
+  fontaines: number;
+}
+
 /**
  * Distribution metrics for SUP token allocation
  */
 export interface DistributionMetrics {
-  /** Total amount of SUP distributed to lockers but not yet unlocked. Includes staked SUP and SUP in fontaines. */
+  /** Total amount of SUP distributed to lockers but not yet unlocked. Includes staked SUP, SUP in LP and SUP in fontaines. */
   reserveBalances: number;
-  /** The SUP in lockers (unstaked) */
+  /** The available SUP in lockers (unstaked) */
   lockerBalances: number;
   /** Portion currently staked via lockers */
   stakedSup: number;
@@ -133,6 +142,8 @@ export interface DistributionMetrics {
   other: number;
   /** Total SUP supply (1B) */
   totalSupply: number;
+  /** Per-locker breakdown */
+  lockers: LockerBreakdown[];
 }
 
 /**
