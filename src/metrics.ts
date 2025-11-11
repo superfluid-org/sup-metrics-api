@@ -23,7 +23,7 @@ import { LOCKER_ABI, SUP_VESTING_FACTORY_ABI } from './abis';
 
 // File paths for metric data
 const DATA_DIR = './data';
-const FILE_SCHEMA_VERSION = 4;
+const FILE_SCHEMA_VERSION = 5;
 
 // Setup viem client with batching support
 const viemClient = createPublicClient({
@@ -229,7 +229,11 @@ const distributionMetricsManager = new MetricsManager<DistributionMetrics>(
     communityCharge: 0,
     investorsTeamLocked: 0,
     daoTreasury: 0,
+    daoTreasuryUnlocked: 0,
+    daoTreasuryLocked: 0,
+    daoSPRProgramManager: 0,
     foundationTreasury: 0,
+    vestingTreasury: 0,
     other: 0,
     totalSupply: 1000000000, // 1B SUP tokens
     lockers: []
@@ -392,8 +396,9 @@ export const getDaoMembersWithFilters = (
 
 export const getDistributionMetrics = (): DistributionMetricsResponse => {
   const { data: distributionData, lastUpdatedAt } = distributionMetricsManager.getData();
+  const { lockers, ...distributionMetrics } = distributionData;
   return {
-    metrics: distributionData,
+    metrics: distributionMetrics,
     lastUpdatedAt
   };
 };
@@ -1075,7 +1080,11 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
       communityCharge: 0,
       investorsTeamLocked: 0,
       daoTreasury: 0,
+      daoTreasuryUnlocked: 0,
+      daoTreasuryLocked: 0,
+      daoSPRProgramManager: 0,
       foundationTreasury: 0,
+      vestingTreasury: 0,
       other: 0,
       totalSupply: 1000000000, // 1B SUP tokens
       lockers: []
@@ -1132,8 +1141,32 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
     const currentBalance = Number((daoTreasuryBalance as bigint) / BigInt(10 ** 18));
     const remainingVestingAmount = Number(totalVestingAmount / BigInt(10 ** 18));
     metrics.daoTreasury = currentBalance + remainingVestingAmount;
+    metrics.daoTreasuryUnlocked = currentBalance;
+    metrics.daoTreasuryLocked = remainingVestingAmount;
     
     console.log(`DAO Treasury: current balance=${currentBalance}, remaining vesting=${remainingVestingAmount}, total=${metrics.daoTreasury}`);
+
+    // Get SUP owned by the SPR Program Manager
+    console.log('Fetching SUP owned by the SPR Program Manager...');
+    const sprProgramManagerBalance = await viemClient.readContract({
+      address: config.baseTokenAddress as Address,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [config.epProgramManager as Address]
+    });
+    metrics.daoSPRProgramManager = Number((sprProgramManagerBalance as bigint) / BigInt(10 ** 18));
+
+    console.log(`SPR Program Manager: balance=${metrics.daoSPRProgramManager}`);
+
+    // Get SUP owner by the Vesting Treasury
+    console.log('Fetching SUP owner by the Vesting Treasury...');
+    const vestingTreasuryBalance = await viemClient.readContract({
+      address: config.baseTokenAddress as Address,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [config.vestingTreasuryAddress as Address]
+    });
+    metrics.vestingTreasury = Number((vestingTreasuryBalance as bigint) / BigInt(10 ** 18));
 
     // Get Foundation Treasury balance (on Ethereum)
     console.log('Fetching Foundation Treasury balance...');
@@ -1310,7 +1343,8 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
     // Calculate "Other" as remainder (note that stakedSup and streamingOut are already included in reserveBalances)
     metrics.other = metrics.totalSupply -
       ( metrics.reserveBalances + metrics.lpSup + metrics.communityCharge + 
-      metrics.investorsTeamLocked + metrics.daoTreasury + metrics.foundationTreasury);
+      metrics.investorsTeamLocked + metrics.daoTreasury + metrics.foundationTreasury +
+      metrics.daoSPRProgramManager + metrics.vestingTreasury);
 
     // Add per-locker breakdown
     metrics.lockers = lockerBreakdowns;

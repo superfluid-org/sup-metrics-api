@@ -147,7 +147,11 @@ export class MetricsController extends Controller {
    */
   @Get('/distribution_metrics')
   public getDistributionMetrics(): DistributionMetricsResponse {
-    return getDistributionMetrics();
+    const distributionMetrics = getDistributionMetrics();
+    return {
+      metrics: distributionMetrics.metrics,
+      lastUpdatedAt: distributionMetrics.lastUpdatedAt
+    };
   }
 
   /**

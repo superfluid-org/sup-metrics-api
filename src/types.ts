@@ -136,8 +136,16 @@ export interface DistributionMetrics {
   investorsTeamLocked: number;
   /** DAO Treasury balance */
   daoTreasury: number;
+  /** DAO portion already unlocked */
+  daoTreasuryUnlocked: number;
+  /** DAO portion still locked */
+  daoTreasuryLocked: number;
+  /** SUP owned by the SPR Program Manager */
+  daoSPRProgramManager: number;
   /** Foundation Treasury balance */
   foundationTreasury: number;
+  /** SUP owned by the Vesting Treasury */
+  vestingTreasury: number;
   /** Remainder of 1B SUP tokens */
   other: number;
   /** Total SUP supply (1B) */
@@ -146,12 +154,14 @@ export interface DistributionMetrics {
   lockers: LockerBreakdown[];
 }
 
+export type DistributionMetricsAggregate = Omit<DistributionMetrics, 'lockers'>;
+
 /**
- * Response for distribution metrics endpoint
+ * Response for distribution metrics endpoint (without per-locker breakdown)
  */
 export interface DistributionMetricsResponse {
   /** Distribution metrics data */
-  metrics: DistributionMetrics;
+  metrics: DistributionMetricsAggregate;
   /** Unix timestamp of last update */
   lastUpdatedAt: number;
 }
