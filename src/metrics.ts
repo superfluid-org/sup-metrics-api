@@ -25,8 +25,9 @@ import { LOCKER_ABI, SUP_VESTING_FACTORY_ABI, SUPERFLUID_POOL_ABI } from './abis
 
 // File paths for metric data
 const DATA_DIR = './data';
-const FILE_SCHEMA_VERSION = 5;
-const HISTORY_FILE_SCHEMA_VERSION = 1;
+const VOTING_METRICS_FILE_SCHEMA_VERSION = 2;
+const DISTRIBUTION_METRICS_FILE_SCHEMA_VERSION = 6;
+const DISTRIBUTION_METRICS_HISTORY_FILE_SCHEMA_VERSION = 1;
 const HISTORY_FILE_NAME = 'distributionMetricsHistory.json';
 const HISTORY_FILE_PATH = path.join(DATA_DIR, HISTORY_FILE_NAME);
 const WEI_PER_TOKEN = BigInt(10) ** BigInt(18);
@@ -95,6 +96,7 @@ interface MetricsData<T> {
 class MetricsManager<T> {
   private data: MetricsData<T>;
   private filePath: string;
+  private schemaVersion: number;
   private updateFn: () => Promise<T>;
   private intervalSec: number;
   private isUpdating: boolean = false;
@@ -104,13 +106,15 @@ class MetricsManager<T> {
     initialData: T,
     updateFn: () => Promise<T>,
     filename: string,
+    schemaVersion: number,
     intervalSec: number
   ) {
     console.log(`Initializing ${filename} with interval ${intervalSec} seconds`);
     this.updateFn = updateFn;
     this.intervalSec = intervalSec;
+    this.schemaVersion = schemaVersion;
     this.data = {
-      schemaVersion: FILE_SCHEMA_VERSION,
+      schemaVersion: this.schemaVersion,
       lastUpdatedAt: 0,
       data: initialData
     };
@@ -153,8 +157,8 @@ class MetricsManager<T> {
     try {
       if (fs.existsSync(this.filePath)) {
         const fileData = JSON.parse(fs.readFileSync(this.filePath, 'utf8'));
-        if (fileData.schemaVersion !== FILE_SCHEMA_VERSION) {
-          console.warn(`File schema version mismatch: ${fileData.schemaVersion} (expected ${FILE_SCHEMA_VERSION})`);
+        if (fileData.schemaVersion !== this.schemaVersion) {
+          console.warn(`File schema version mismatch: ${fileData.schemaVersion} (expected ${this.schemaVersion})`);
           return false;
         }
         this.data = fileData;
@@ -181,7 +185,7 @@ class MetricsManager<T> {
       const newData = await this.updateFn();
       const currentTimestamp = Math.floor(Date.now() / 1000);
       this.data = {
-        schemaVersion: FILE_SCHEMA_VERSION,
+        schemaVersion: this.schemaVersion,
         lastUpdatedAt: currentTimestamp,
         data: newData
       };
@@ -242,7 +246,7 @@ class MetricsManager<T> {
 }
 
 const defaultHistoricalData: MetricsData<DistributionMetricsHistoryEntry[]> = {
-  schemaVersion: HISTORY_FILE_SCHEMA_VERSION,
+  schemaVersion: DISTRIBUTION_METRICS_HISTORY_FILE_SCHEMA_VERSION,
   lastUpdatedAt: 0,
   data: []
 };
@@ -263,8 +267,8 @@ function loadHistoricalDistributionMetricsFromDisk(): void {
       return;
     }
     const fileData = JSON.parse(fs.readFileSync(HISTORY_FILE_PATH, 'utf8'));
-    if (fileData.schemaVersion !== HISTORY_FILE_SCHEMA_VERSION) {
-      console.warn(`Historical metrics schema version mismatch: ${fileData.schemaVersion} (expected ${HISTORY_FILE_SCHEMA_VERSION})`);
+    if (fileData.schemaVersion !== DISTRIBUTION_METRICS_HISTORY_FILE_SCHEMA_VERSION) {
+      console.warn(`Historical metrics schema version mismatch: ${fileData.schemaVersion} (expected ${DISTRIBUTION_METRICS_HISTORY_FILE_SCHEMA_VERSION})`);
       return;
     }
     historicalDistributionMetrics = fileData;
@@ -289,7 +293,8 @@ function saveHistoricalDistributionMetricsToDisk(data: MetricsData<DistributionM
 const votingMetricsManager = new MetricsManager<Record<string, MemberData>>(
   {},
   fetchVotingMetrics,
-  'votingMetrics.json',
+  "votingMetrics.json",
+  VOTING_METRICS_FILE_SCHEMA_VERSION,
   config.votingMetricsUpdateInterval
 );
 
@@ -309,12 +314,14 @@ const distributionMetricsManager = new MetricsManager<DistributionMetrics>(
     daoSPRProgramManager: 0,
     foundationTreasury: 0,
     vestingTreasury: 0,
+    supCorpOps: 0,
     other: 0,
     totalSupply: 1000000000, // 1B SUP tokens
     lockers: []
   },
   fetchDistributionMetrics,
-  'distributionMetrics.json',
+  "distributionMetrics.json",
+  DISTRIBUTION_METRICS_FILE_SCHEMA_VERSION,
   config.distributionMetricsUpdateInterval
 );
 
@@ -1091,7 +1098,9 @@ async function fetchHistoricalDistributionMetrics(
         daoTreasuryBalanceWei,
         sprProgramManagerBalanceWei,
         vestingTreasuryBalanceWei,
-        taxDistributionUnits
+        taxDistributionUnits,
+        supCorpTreasuryBalanceWei,
+        supCorpOpsBalanceWei,
       ] = await Promise.all([
         viemClient.readContract({
           address: config.baseTokenAddress as Address,
@@ -1135,6 +1144,20 @@ async function fetchHistoricalDistributionMetrics(
           functionName: 'getTotalUnits',
           args: [],
           blockNumber: baseBlock
+        }),
+        viemClient.readContract({
+          address: config.baseTokenAddress as Address,
+          abi: erc20Abi,
+          functionName: 'balanceOf',
+          args: [config.supCorpTreasuryAddress as Address],
+          blockNumber: baseBlock
+        }),
+        viemClient.readContract({
+          address: config.baseTokenAddress as Address,
+          abi: erc20Abi,
+          functionName: 'balanceOf',
+          args: [config.supCorpOpsAddress as Address],
+          blockNumber: baseBlock
         })
       ]);
 
@@ -1167,6 +1190,25 @@ async function fetchHistoricalDistributionMetrics(
         blockNumber: ethereumBlock
       });
 
+
+      const supCorpTreasuryEthereumBalanceWei = await ethereumClient.readContract({
+        address: config.ethereumTokenAddress as Address,
+        abi: erc20Abi,
+        functionName: 'balanceOf',
+        args: [config.supCorpTreasuryAddress as Address],
+        blockNumber: ethereumBlock
+      });
+
+      const supCorpOpsEthereumBalanceWei = await ethereumClient.readContract({
+        address: config.ethereumTokenAddress as Address,
+        abi: erc20Abi,
+        functionName: 'balanceOf',
+        args: [config.supCorpOpsAddress as Address],
+        blockNumber: ethereumBlock
+      });
+    
+      console.log(`  supCorpTreasuryEthereumBalanceWei: ${supCorpTreasuryEthereumBalanceWei.toString()}, supCorpOpsEthereumBalanceWei: ${supCorpOpsEthereumBalanceWei.toString()}`);
+
       const stakedSup = Number(taxDistributionUnits as bigint);
       const communityCharge = toTokenNumber(communityChargeBalance as bigint);
       const investorsTeamLocked = toTokenNumber(investorsTeamLockedWei as bigint);
@@ -1174,6 +1216,9 @@ async function fetchHistoricalDistributionMetrics(
       const daoSPRProgramManager = toTokenNumber(sprProgramManagerBalanceWei as bigint);
       const vestingTreasury = toTokenNumber(vestingTreasuryBalanceWei as bigint);
       const foundationTreasury = toTokenNumber(foundationTreasuryBalanceWei as bigint);
+      // SUP corp treasury on Ethereum is considered ops
+      const supCorpOps = toTokenNumber(supCorpOpsBalanceWei + supCorpOpsEthereumBalanceWei + supCorpTreasuryEthereumBalanceWei);
+      console.log(`  supCorpOps: ${supCorpOps}, supCorpOpsBalanceWei: ${supCorpOpsBalanceWei.toString()}, supCorpOpsEthereumBalanceWei: ${supCorpOpsEthereumBalanceWei.toString()}, supCorpTreasuryEthereumBalanceWei: ${supCorpTreasuryEthereumBalanceWei.toString()}`);
 
       const vestingSchedules = await getVestingSchedules(null, [config.daoTreasuryAddress], true, baseBlock);
       let totalVestingAmount = 0n;
@@ -1185,7 +1230,8 @@ async function fetchHistoricalDistributionMetrics(
           }
         }
       }
-      const daoTreasuryLocked = toTokenNumber(totalVestingAmount);
+      // before the vesting was created, all the amount of supCorpTreasury shall be associated to DAO locked
+      const daoTreasuryLocked = totalVestingAmount === 0n ? toTokenNumber(supCorpTreasuryBalanceWei as bigint) : toTokenNumber(totalVestingAmount);
       const daoTreasury = daoTreasuryUnlocked + daoTreasuryLocked;
 
       const lpSup = 0; // TODO: derive LP SUP historically
@@ -1194,7 +1240,7 @@ async function fetchHistoricalDistributionMetrics(
 
       const totalSupply = 1000000000;
       const otherRaw = totalSupply -
-        (reserveBalances + communityCharge + investorsTeamLocked + daoTreasury + foundationTreasury + daoSPRProgramManager + vestingTreasury);
+        (reserveBalances + communityCharge + investorsTeamLocked + daoTreasury + foundationTreasury + daoSPRProgramManager + vestingTreasury + supCorpOps);
       const other = otherRaw < 0 ? 0 : otherRaw;
 
       snapshots.push({
@@ -1212,6 +1258,7 @@ async function fetchHistoricalDistributionMetrics(
         daoSPRProgramManager,
         foundationTreasury,
         vestingTreasury,
+        supCorpOps,
         other,
         totalSupply
       });
@@ -1241,7 +1288,7 @@ async function refreshHistoricalDistributionMetricsIfNeeded(): Promise<void> {
     const lastUpdatedAt = Math.floor(Date.now() / 1000);
 
     const payload: MetricsData<DistributionMetricsHistoryEntry[]> = {
-      schemaVersion: HISTORY_FILE_SCHEMA_VERSION,
+      schemaVersion: DISTRIBUTION_METRICS_HISTORY_FILE_SCHEMA_VERSION,
       lastUpdatedAt,
       data: historicalSnapshots
     };
@@ -1797,6 +1844,7 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
       daoSPRProgramManager: 0,
       foundationTreasury: 0,
       vestingTreasury: 0,
+      supCorpOps: 0,
       other: 0,
       totalSupply: 1000000000, // 1B SUP tokens
       lockers: []
@@ -1880,8 +1928,7 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
     });
     metrics.vestingTreasury = Number((vestingTreasuryBalance as bigint) / BigInt(10 ** 18));
 
-    // Get Foundation Treasury balance (on Ethereum)
-    console.log('Fetching Foundation Treasury balance...');
+
     const ethereumViemClient = createPublicClient({
       chain: mainnet,
       transport: http(config.ethereumRpcUrl, {
@@ -1890,6 +1937,28 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
         }
       }),
     });
+
+    // Get SUP owned by the Corp ops on Ethereum
+    console.log('Fetching SUP owned by the Corp ops on Ethereum...');
+    const supCorpOpsEthereumBalance = await ethereumViemClient.readContract({
+      address: config.baseTokenAddress as Address,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [config.supCorpOpsAddress as Address]
+    });
+    // Get SUP owned by the Corp ops on Base
+    console.log('Fetching SUP owned by the Corp ops on Base...');
+    const supCorpOpsBaseBalance = await viemClient.readContract({
+      address: config.baseTokenAddress as Address,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [config.supCorpOpsAddress as Address]
+    });
+
+    metrics.supCorpOps = Number((supCorpOpsEthereumBalance + supCorpOpsBaseBalance as bigint) / BigInt(10 ** 18));
+
+    // Get Foundation Treasury balance (on Ethereum)
+    console.log('Fetching Foundation Treasury balance...');
     const foundationTreasuryBalance = await ethereumViemClient.readContract({
       address: config.ethereumTokenAddress as Address,
       abi: erc20Abi,
@@ -2056,7 +2125,7 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
     metrics.other = metrics.totalSupply -
       ( metrics.reserveBalances + metrics.lpSup + metrics.communityCharge + 
       metrics.investorsTeamLocked + metrics.daoTreasury + metrics.foundationTreasury +
-      metrics.daoSPRProgramManager + metrics.vestingTreasury);
+      metrics.daoSPRProgramManager + metrics.vestingTreasury + metrics.supCorpOps);
 
     // Add per-locker breakdown
     metrics.lockers = lockerBreakdowns;
@@ -2071,6 +2140,7 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
       investorsTeamLocked: metrics.investorsTeamLocked,
       daoTreasury: metrics.daoTreasury,
       foundationTreasury: metrics.foundationTreasury,
+      supCorpOps: metrics.supCorpOps,
       other: metrics.other,
       totalSupply: metrics.totalSupply,
       lockers: metrics.lockers.length

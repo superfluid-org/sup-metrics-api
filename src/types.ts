@@ -146,6 +146,8 @@ export interface DistributionMetrics {
   foundationTreasury: number;
   /** SUP owned by the Vesting Treasury */
   vestingTreasury: number;
+  /** SUP Corp ops */
+  supCorpOps: number;
   /** Remainder of 1B SUP tokens */
   other: number;
   /** Total SUP supply (1B) */

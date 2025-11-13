@@ -34,6 +34,8 @@ export const config = {
   daoTreasuryAddress: process.env.DAO_TREASURY_ADDRESS || '0xac808840f02c47C05507f48165d2222FF28EF4e1',
   foundationTreasuryAddress: process.env.FOUNDATION_TREASURY_ADDRESS || '0xb2a19fB5C2cF21505f5dD12335Dc8B73a17FE5Ff',
   vestingTreasuryAddress: process.env.VESTING_TREASURY_ADDRESS || '0x5c0fdb8602d5721276179c51c81f0e50e36846a4',
+  supCorpTreasuryAddress: process.env.SUP_CORP_TREASURY_ADDRESS || '0x48f1762b05a811de8693d0bdb146542e1ae5a0da',
+  supCorpOpsAddress: process.env.SUP_CORP_OPS_ADDRESS || '0x9851626c2BBA2b019a2c859e5e80DA62A021024c',
   
   // App
   port: parseInt(process.env.PORT || '3000', 10),
