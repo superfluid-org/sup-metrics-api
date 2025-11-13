@@ -12,18 +12,49 @@ import {
   DistributionMetrics,
   DistributionMetricsResponse,
   VestingSchedule,
-  LockerBreakdown
+  LockerBreakdown,
+  DistributionMetricsHistoryEntry,
+  DistributionMetricsHistoryResponse
 } from './types'; 
 import snapshot from '@snapshot-labs/snapshot.js';
 import snapshotStrategies from '@d10r/snapshot-strategies';
 import { createPublicClient, http, Client, Chain, Transport, Address, erc20Abi } from 'viem';
 import { base, mainnet } from 'viem/chains'
 import * as ethersProviders from '@ethersproject/providers';
-import { LOCKER_ABI, SUP_VESTING_FACTORY_ABI } from './abis';
+import { LOCKER_ABI, SUP_VESTING_FACTORY_ABI, SUPERFLUID_POOL_ABI } from './abis';
 
 // File paths for metric data
 const DATA_DIR = './data';
 const FILE_SCHEMA_VERSION = 5;
+const HISTORY_FILE_SCHEMA_VERSION = 1;
+const HISTORY_FILE_NAME = 'distributionMetricsHistory.json';
+const HISTORY_FILE_PATH = path.join(DATA_DIR, HISTORY_FILE_NAME);
+const WEI_PER_TOKEN = BigInt(10) ** BigInt(18);
+const baseBlockNumberCache = new Map<number, bigint>();
+const ethereumBlockNumberCache = new Map<number, bigint>();
+const VESTING_FACTORY_DEPLOYMENT_BLOCK = 33631769n;
+const BASE_BLOCK_TIME_SECONDS = 2; // Base has ~2 second block time
+const ETHEREUM_BLOCK_TIME_SECONDS = 12; // Ethereum has ~12 second block time
+const FIVE_MINUTE_WINDOW_SECONDS = 5 * 60;
+
+interface BlockSearchState {
+  blockNumber: bigint;
+  blockTimestamp: number;
+  targetTimestamp: number;
+  secondsPerBlock: number;
+}
+
+const blockSearchHints = new WeakMap<Map<number, bigint>, BlockSearchState>();
+
+// Helper function to safely stringify objects that may contain BigInt values
+function safeStringify(obj: any, space?: number): string {
+  return JSON.stringify(obj, (key, value) => {
+    if (typeof value === 'bigint') {
+      return value.toString();
+    }
+    return value;
+  }, space);
+}
 
 // Setup viem client with batching support
 const viemClient = createPublicClient({
@@ -210,6 +241,50 @@ class MetricsManager<T> {
   }
 }
 
+const defaultHistoricalData: MetricsData<DistributionMetricsHistoryEntry[]> = {
+  schemaVersion: HISTORY_FILE_SCHEMA_VERSION,
+  lastUpdatedAt: 0,
+  data: []
+};
+
+let historicalDistributionMetrics: MetricsData<DistributionMetricsHistoryEntry[]> = { ...defaultHistoricalData };
+
+function ensureDataDirectoryExists(): void {
+  if (!fs.existsSync(DATA_DIR)) {
+    console.log(`Creating data directory ${DATA_DIR}`);
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+}
+
+function loadHistoricalDistributionMetricsFromDisk(): void {
+  try {
+    ensureDataDirectoryExists();
+    if (!fs.existsSync(HISTORY_FILE_PATH)) {
+      return;
+    }
+    const fileData = JSON.parse(fs.readFileSync(HISTORY_FILE_PATH, 'utf8'));
+    if (fileData.schemaVersion !== HISTORY_FILE_SCHEMA_VERSION) {
+      console.warn(`Historical metrics schema version mismatch: ${fileData.schemaVersion} (expected ${HISTORY_FILE_SCHEMA_VERSION})`);
+      return;
+    }
+    historicalDistributionMetrics = fileData;
+  } catch (error) {
+    console.error('Error loading historical distribution metrics:', error);
+  }
+}
+
+function saveHistoricalDistributionMetricsToDisk(data: MetricsData<DistributionMetricsHistoryEntry[]>): void {
+  try {
+    ensureDataDirectoryExists();
+    fs.writeFileSync(
+      HISTORY_FILE_PATH,
+      JSON.stringify(data, null, 2)
+    );
+  } catch (error) {
+    console.error('Error saving historical distribution metrics:', error);
+  }
+}
+
 // Create voting metrics manager instance
 const votingMetricsManager = new MetricsManager<Record<string, MemberData>>(
   {},
@@ -242,6 +317,11 @@ const distributionMetricsManager = new MetricsManager<DistributionMetrics>(
   'distributionMetrics.json',
   config.distributionMetricsUpdateInterval
 );
+
+loadHistoricalDistributionMetricsFromDisk();
+if (process.env.REFRESH_HISTORICAL_STATE && process.env.REFRESH_HISTORICAL_STATE.toLowerCase() === 'true') {
+  void refreshHistoricalDistributionMetricsIfNeeded();
+}
 
 // Cache for space config with 24h expiration
 let cachedSpaceConfig: SpaceConfig | undefined;
@@ -403,6 +483,13 @@ export const getDistributionMetrics = (): DistributionMetricsResponse => {
   };
 };
 
+export const getDistributionMetricsHistory = (): DistributionMetricsHistoryResponse => {
+  return {
+    metrics: historicalDistributionMetrics.data,
+    lastUpdatedAt: historicalDistributionMetrics.lastUpdatedAt
+  };
+};
+
 // Function to get investors and team addresses from vesting schedules
 async function getInvestorsAndTeamAddresses(): Promise<string[]> {
   // Step 1: Get vesting sender contracts from transfer events
@@ -455,13 +542,16 @@ async function getInvestorsAndTeamAddresses(): Promise<string[]> {
 async function getVestingSchedules(
   senders: string[] | null = null,
   receivers: string[] | null = null,
-  onlyFlowing: boolean = false
+  onlyFlowing: boolean = false,
+  blockNumber?: bigint
 ): Promise<VestingSchedule[]> {
   try {
+    const blockClause = blockNumber !== undefined ? `block: { number: ${blockNumber.toString()} },` : '';
     const vestingSchedules = await queryAllPages(
       (lastId) => `{
         vestingSchedules(
           first: 1000,
+          ${blockClause}
           where: {
             superToken: "${config.baseTokenAddress}",
             ${onlyFlowing ? 'cliffAndFlowExecutedAt_not: null, endExecutedAt: null,' : ''}
@@ -539,6 +629,628 @@ async function queryAllPages<T>(
   }
 
   return items;
+}
+
+interface ProgramManagerStreamState {
+  streamedUntilUpdatedAt: bigint;
+  currentFlowRate: bigint;
+  updatedAtTimestamp: number;
+  createdAtTimestamp: number;
+}
+
+function toTokenNumber(value: bigint): number {
+  return Number(value / WEI_PER_TOKEN);
+}
+
+async function getBlockNumberAtOrBefore(
+  client: any,
+  timestamp: number,
+  cache: Map<number, bigint>,
+  lowerBound: bigint,
+  upperBound: bigint
+): Promise<bigint> {
+  if (cache.has(timestamp)) {
+    const cachedBlock = cache.get(timestamp)!;
+    console.log(`getBlockNumberAtOrBefore(${timestamp}) -> block ${cachedBlock} (cached) using 0 RPC calls`);
+    return cachedBlock;
+  }
+
+  const clampBlockNumber = (value: bigint): bigint => {
+    if (value < lowerBound) return lowerBound;
+    if (value > upperBound) return upperBound;
+    return value;
+  };
+
+  let rpcCalls = 0;
+  const seenBlocks = new Map<bigint, number>();
+  const fetchTimestamp = async (blockNumber: bigint): Promise<number> => {
+    if (seenBlocks.has(blockNumber)) {
+      return seenBlocks.get(blockNumber)!;
+    }
+    const block = await client.getBlock({ blockNumber, includeTransactions: false });
+    rpcCalls += 1;
+    const blockTimestamp = Number(block.timestamp);
+    console.log(`  fetched block ${blockNumber} at timestamp ${blockTimestamp}`);
+    seenBlocks.set(blockNumber, blockTimestamp);
+    return blockTimestamp;
+  };
+
+  const hint = blockSearchHints.get(cache);
+  // Use chain-specific default block time based on which cache is used
+  const defaultBlockTime = cache === baseBlockNumberCache 
+    ? BASE_BLOCK_TIME_SECONDS 
+    : cache === ethereumBlockNumberCache 
+    ? ETHEREUM_BLOCK_TIME_SECONDS 
+    : BASE_BLOCK_TIME_SECONDS; // fallback to Base
+  let secondsPerBlock = hint?.secondsPerBlock ?? defaultBlockTime;
+
+  const estimateFromHint = (): bigint => {
+    if (!hint) {
+      // When no hint exists, use previous block (lowerBound) if available
+      // Otherwise start from upperBound and work backwards
+      if (lowerBound > 0n) {
+        // We have a previous block, estimate forward from it
+        // This is a conservative estimate - we'll refine it
+        return clampBlockNumber(lowerBound);
+      }
+      // No previous block, start from upper bound (will be refined)
+      return clampBlockNumber(upperBound);
+    }
+    const deltaSeconds = timestamp - hint.targetTimestamp;
+    const deltaBlocks = Math.round(deltaSeconds / Math.max(1, secondsPerBlock));
+    return clampBlockNumber(hint.blockNumber + BigInt(deltaBlocks));
+  };
+
+  const updateBounds = (
+    blockNumber: bigint,
+    blockTimestamp: number,
+    bounds: {
+      lowBlock: bigint | null;
+      lowTimestamp: number;
+      highBlock: bigint | null;
+      highTimestamp: number;
+    }
+  ) => {
+    if (blockTimestamp < timestamp) {
+      if (!bounds.lowBlock || blockNumber > bounds.lowBlock) {
+        bounds.lowBlock = blockNumber;
+        bounds.lowTimestamp = blockTimestamp;
+      }
+    } else {
+      if (!bounds.highBlock || blockNumber < bounds.highBlock) {
+        bounds.highBlock = blockNumber;
+        bounds.highTimestamp = blockTimestamp;
+      }
+    }
+  };
+
+  const bounds = {
+    lowBlock: null as bigint | null,
+    lowTimestamp: 0,
+    highBlock: null as bigint | null,
+    highTimestamp: 0
+  };
+
+  const windowEnd = timestamp + FIVE_MINUTE_WINDOW_SECONDS;
+  const isWithinWindow = (blockTimestamp: number): boolean => {
+    return blockTimestamp >= timestamp && blockTimestamp <= windowEnd;
+  };
+
+  let guess = estimateFromHint();
+  let guessTimestamp = await fetchTimestamp(guess);
+  updateBounds(guess, guessTimestamp, bounds);
+  
+  // Early exit if guess is already within window
+  if (isWithinWindow(guessTimestamp)) {
+    cache.set(timestamp, guess);
+    const smoothedSecondsPerBlock = hint
+      ? hint.secondsPerBlock * 0.5 + secondsPerBlock * 0.5
+      : secondsPerBlock;
+    blockSearchHints.set(cache, {
+      blockNumber: guess,
+      blockTimestamp: guessTimestamp,
+      targetTimestamp: timestamp,
+      secondsPerBlock: Math.max(0.5, Math.min(60, smoothedSecondsPerBlock))
+    });
+    console.log(`getBlockNumberAtOrBefore(${timestamp}) -> block ${guess} (ts=${guessTimestamp}) using ${rpcCalls} RPC calls`);
+    return guess;
+  }
+
+  const stepForward = async (anchorBlock: bigint, anchorTimestamp: number): Promise<boolean> => {
+    const secondsBehind = timestamp - anchorTimestamp;
+    const step = BigInt(Math.max(1, Math.round(secondsBehind / Math.max(1, secondsPerBlock))));
+    let nextBlock = clampBlockNumber(anchorBlock + step);
+    if (nextBlock === anchorBlock) {
+      if (nextBlock === upperBound) return false;
+      nextBlock = clampBlockNumber(anchorBlock + 1n);
+      if (nextBlock === anchorBlock) return false;
+    }
+    const nextTimestamp = await fetchTimestamp(nextBlock);
+    updateBounds(nextBlock, nextTimestamp, bounds);
+    return isWithinWindow(nextTimestamp);
+  };
+
+  const stepBackward = async (anchorBlock: bigint, anchorTimestamp: number): Promise<boolean> => {
+    const secondsAhead = anchorTimestamp - timestamp;
+    const step = BigInt(Math.max(1, Math.round(secondsAhead / Math.max(1, secondsPerBlock))));
+    let nextBlock = clampBlockNumber(anchorBlock - step);
+    if (nextBlock === anchorBlock) {
+      if (nextBlock === lowerBound) return false;
+      nextBlock = clampBlockNumber(anchorBlock - 1n);
+      if (nextBlock === anchorBlock) return false;
+    }
+    const nextTimestamp = await fetchTimestamp(nextBlock);
+    updateBounds(nextBlock, nextTimestamp, bounds);
+    return isWithinWindow(nextTimestamp);
+  };
+
+  while (!bounds.highBlock || bounds.highTimestamp < timestamp) {
+    const anchorBlock = bounds.lowBlock ?? bounds.highBlock ?? guess;
+    const anchorTimestamp = bounds.lowBlock ? bounds.lowTimestamp : bounds.highTimestamp || guessTimestamp;
+    if (anchorBlock === upperBound && bounds.highTimestamp < timestamp) {
+      break;
+    }
+    const foundWithinWindow = await stepForward(anchorBlock, anchorTimestamp);
+    if (foundWithinWindow) {
+      // Found a block within window, use it
+      cache.set(timestamp, bounds.highBlock!);
+      const smoothedSecondsPerBlock = hint
+        ? hint.secondsPerBlock * 0.5 + secondsPerBlock * 0.5
+        : secondsPerBlock;
+      blockSearchHints.set(cache, {
+        blockNumber: bounds.highBlock!,
+        blockTimestamp: bounds.highTimestamp,
+        targetTimestamp: timestamp,
+        secondsPerBlock: Math.max(0.5, Math.min(60, smoothedSecondsPerBlock))
+      });
+      console.log(`getBlockNumberAtOrBefore(${timestamp}) -> block ${bounds.highBlock} (ts=${bounds.highTimestamp}) using ${rpcCalls} RPC calls`);
+      return bounds.highBlock!;
+    }
+    if ((bounds.highBlock ?? anchorBlock) === upperBound) {
+      break;
+    }
+    if (!bounds.highBlock && (bounds.lowBlock ?? anchorBlock) === upperBound) {
+      break;
+    }
+  }
+
+  while (!bounds.lowBlock || bounds.lowTimestamp >= timestamp) {
+    const anchorBlock = bounds.highBlock ?? bounds.lowBlock ?? guess;
+    const anchorTimestamp = bounds.highBlock ? bounds.highTimestamp : bounds.lowTimestamp || guessTimestamp;
+    if (anchorBlock === lowerBound && (!bounds.lowBlock || bounds.lowTimestamp >= timestamp)) {
+      break;
+    }
+    const foundWithinWindow = await stepBackward(anchorBlock, anchorTimestamp);
+    if (foundWithinWindow) {
+      // Found a block within window, use it
+      cache.set(timestamp, bounds.highBlock!);
+      const smoothedSecondsPerBlock = hint
+        ? hint.secondsPerBlock * 0.5 + secondsPerBlock * 0.5
+        : secondsPerBlock;
+      blockSearchHints.set(cache, {
+        blockNumber: bounds.highBlock!,
+        blockTimestamp: bounds.highTimestamp,
+        targetTimestamp: timestamp,
+        secondsPerBlock: Math.max(0.5, Math.min(60, smoothedSecondsPerBlock))
+      });
+      console.log(`getBlockNumberAtOrBefore(${timestamp}) -> block ${bounds.highBlock} (ts=${bounds.highTimestamp}) using ${rpcCalls} RPC calls`);
+      return bounds.highBlock!;
+    }
+    if ((bounds.lowBlock ?? anchorBlock) === lowerBound) {
+      break;
+    }
+    if (!bounds.lowBlock && (bounds.highBlock ?? anchorBlock) === lowerBound) {
+      break;
+    }
+  }
+
+  if (!bounds.highBlock) {
+    bounds.highBlock = upperBound;
+    bounds.highTimestamp = await fetchTimestamp(upperBound);
+  }
+
+  if (!bounds.lowBlock) {
+    bounds.lowBlock = lowerBound;
+    bounds.lowTimestamp = await fetchTimestamp(lowerBound);
+  }
+
+  if (bounds.highTimestamp < timestamp) {
+    cache.set(timestamp, bounds.highBlock);
+    console.warn(`Using latest available block ${bounds.highBlock} for timestamp ${timestamp} (ts=${bounds.highTimestamp})`);
+    console.log(`getBlockNumberAtOrBefore(${timestamp}) -> block ${bounds.highBlock} (ts=${bounds.highTimestamp}) using ${rpcCalls} RPC calls`);
+    return bounds.highBlock;
+  }
+  
+  // Early exit: if highBlock is already within the acceptable window, use it
+  if (isWithinWindow(bounds.highTimestamp)) {
+    cache.set(timestamp, bounds.highBlock);
+    const smoothedSecondsPerBlock = hint
+      ? hint.secondsPerBlock * 0.5 + secondsPerBlock * 0.5
+      : secondsPerBlock;
+    blockSearchHints.set(cache, {
+      blockNumber: bounds.highBlock,
+      blockTimestamp: bounds.highTimestamp,
+      targetTimestamp: timestamp,
+      secondsPerBlock: Math.max(0.5, Math.min(60, smoothedSecondsPerBlock))
+    });
+    console.log(`getBlockNumberAtOrBefore(${timestamp}) -> block ${bounds.highBlock} (ts=${bounds.highTimestamp}) using ${rpcCalls} RPC calls`);
+    return bounds.highBlock;
+  }
+
+  while (bounds.highBlock - bounds.lowBlock > 1n) {
+    const mid = bounds.lowBlock + (bounds.highBlock - bounds.lowBlock) / 2n;
+    const midTimestamp = await fetchTimestamp(mid);
+    updateBounds(mid, midTimestamp, bounds);
+    
+    // Early exit: if we found a block within the acceptable window, use it
+    if (isWithinWindow(bounds.highTimestamp)) {
+      break;
+    }
+  }
+
+  let resultBlock = bounds.highBlock;
+  let resultTimestamp = bounds.highTimestamp;
+
+  while (resultTimestamp > windowEnd && resultBlock > lowerBound) {
+    const prevBlock = resultBlock - 1n;
+    const prevTimestamp = await fetchTimestamp(prevBlock);
+    if (prevTimestamp < timestamp) {
+      break;
+    }
+    resultBlock = prevBlock;
+    resultTimestamp = prevTimestamp;
+  }
+
+  if (resultTimestamp > windowEnd) {
+    console.warn(`No block within 5 minute window for timestamp ${timestamp}; using block ${resultBlock} (ts=${resultTimestamp})`);
+  }
+
+  cache.set(timestamp, resultBlock);
+
+  let observedSecondsPerBlock = secondsPerBlock;
+  if (seenBlocks.size >= 2) {
+    const entries = Array.from(seenBlocks.entries()).sort((a, b) => (a[0] < b[0] ? -1 : 1));
+    const [firstBlock, firstTimestamp] = entries[0];
+    const [lastBlock, lastTimestamp] = entries[entries.length - 1];
+    const blockDelta = Number(lastBlock - firstBlock);
+    const timeDelta = lastTimestamp - firstTimestamp;
+    if (blockDelta > 0 && timeDelta > 0) {
+      observedSecondsPerBlock = timeDelta / blockDelta;
+    }
+  }
+
+  const smoothedSecondsPerBlock = hint
+    ? hint.secondsPerBlock * 0.5 + observedSecondsPerBlock * 0.5
+    : observedSecondsPerBlock;
+
+  blockSearchHints.set(cache, {
+    blockNumber: resultBlock,
+    blockTimestamp: resultTimestamp,
+    targetTimestamp: timestamp,
+    secondsPerBlock: Math.max(0.5, Math.min(60, smoothedSecondsPerBlock))
+  });
+
+  console.log(`getBlockNumberAtOrBefore(${timestamp}) -> block ${resultBlock} (ts=${resultTimestamp}) using ${rpcCalls} RPC calls`);
+
+  return resultBlock;
+}
+
+async function sumProgramManagerTransfers(
+  direction: 'in' | 'out',
+  blockNumber: bigint,
+  tokenAddress: string,
+  programManager: string
+): Promise<bigint> {
+  const directionField = direction === 'out' ? 'from' : 'to';
+  const transfers = await queryAllPages<bigint>(
+    (lastId) => `{
+      transferEvents(
+        first: 1000,
+        block: { number: ${blockNumber.toString()} },
+        where: {
+          token: "${tokenAddress}",
+          ${directionField}: "${programManager}",
+          id_gt: "${lastId}"
+        },
+        orderBy: id,
+        orderDirection: asc
+      ) {
+        id
+        value
+      }
+    }`,
+    (res) => res.data.data.transferEvents,
+    (item) => BigInt(item.value),
+    config.sfSubgraphUrl
+  );
+
+  return transfers.reduce((sum, value) => sum + value, 0n);
+}
+
+async function fetchProgramManagerStreamsAtBlock(
+  direction: 'in' | 'out',
+  blockNumber: bigint,
+  tokenAddress: string,
+  programManager: string
+): Promise<ProgramManagerStreamState[]> {
+  const directionField = direction === 'out' ? 'sender' : 'receiver';
+
+  return queryAllPages<ProgramManagerStreamState>(
+    (lastId) => `{
+      streams(
+        first: 1000,
+        block: { number: ${blockNumber.toString()} },
+        where: {
+          token: "${tokenAddress}",
+          ${directionField}: "${programManager}",
+          id_gt: "${lastId}"
+        },
+        orderBy: id,
+        orderDirection: asc
+      ) {
+        id
+        streamedUntilUpdatedAt
+        currentFlowRate
+        updatedAtTimestamp
+        createdAtTimestamp
+      }
+    }`,
+    (res) => res.data.data.streams,
+    (item) => ({
+      streamedUntilUpdatedAt: BigInt(item.streamedUntilUpdatedAt),
+      currentFlowRate: BigInt(item.currentFlowRate),
+      updatedAtTimestamp: parseInt(item.updatedAtTimestamp, 10),
+      createdAtTimestamp: parseInt(item.createdAtTimestamp, 10)
+    }),
+    config.sfSubgraphUrl
+  );
+}
+
+function sumStreamAmounts(streams: ProgramManagerStreamState[], refTimestamp: number): bigint {
+  return streams.reduce((total, stream) => {
+    if (refTimestamp <= stream.createdAtTimestamp) {
+      return total;
+    }
+    if (stream.updatedAtTimestamp > refTimestamp) {
+      return total;
+    }
+    const deltaSeconds = refTimestamp > stream.updatedAtTimestamp
+      ? BigInt(refTimestamp - stream.updatedAtTimestamp)
+      : 0n;
+    return total + stream.streamedUntilUpdatedAt + stream.currentFlowRate * deltaSeconds;
+  }, 0n);
+}
+
+async function fetchHistoricalDistributionMetrics(
+  startTimestamp: number,
+  endTimestamp: number,
+  stepSeconds: number = 86400 * 7
+): Promise<DistributionMetricsHistoryEntry[]> {
+  if (endTimestamp < startTimestamp) {
+    return [];
+  }
+
+  console.log(`Starting historical distribution metrics fetch from ${new Date(startTimestamp * 1000).toISOString()} to ${new Date(endTimestamp * 1000).toISOString()}`);
+
+  const snapshots: DistributionMetricsHistoryEntry[] = [];
+  const programManagerAddress = config.epProgramManager.toLowerCase();
+  const tokenAddress = config.baseTokenAddress.toLowerCase();
+
+  const ethereumClient = createPublicClient({
+    chain: mainnet,
+    transport: http(config.ethereumRpcUrl, {
+      batch: {
+        wait: 100
+      }
+    }),
+  });
+
+  const latestBaseBlock = await viemClient.getBlockNumber();
+  const latestEthereumBlock = await ethereumClient.getBlockNumber();
+
+  let previousBaseBlock = 0n;
+  let previousEthereumBlock = 0n;
+
+  for (let timestamp = startTimestamp; timestamp <= endTimestamp; timestamp += stepSeconds) {
+    try {
+      console.log(`Calculating historical distribution metrics for ${new Date(timestamp * 1000).toISOString().slice(0, 10)}`);
+
+      const baseBlock = await getBlockNumberAtOrBefore(
+        viemClient,
+        timestamp,
+        baseBlockNumberCache,
+        previousBaseBlock,
+        latestBaseBlock
+      );
+      const ethereumBlock = await getBlockNumberAtOrBefore(
+        ethereumClient,
+        timestamp,
+        ethereumBlockNumberCache,
+        previousEthereumBlock,
+        latestEthereumBlock
+      );
+
+      previousBaseBlock = baseBlock;
+      previousEthereumBlock = ethereumBlock;
+
+      const investorsTeamLockedPromise: Promise<bigint> =
+        baseBlock >= VESTING_FACTORY_DEPLOYMENT_BLOCK
+          ? (viemClient.readContract({
+              address: config.vestingFactoryAddress as Address,
+              abi: SUP_VESTING_FACTORY_ABI,
+              functionName: 'totalSupply',
+              args: [],
+              blockNumber: baseBlock
+            }) as Promise<bigint>).catch(() => 0n)
+          : Promise.resolve<bigint>(0n);
+
+      const [
+        programManagerBalance,
+        communityChargeBalance,
+        investorsTeamLockedWei,
+        daoTreasuryBalanceWei,
+        sprProgramManagerBalanceWei,
+        vestingTreasuryBalanceWei,
+        taxDistributionUnits
+      ] = await Promise.all([
+        viemClient.readContract({
+          address: config.baseTokenAddress as Address,
+          abi: erc20Abi,
+          functionName: 'balanceOf',
+          args: [config.epProgramManager as Address],
+          blockNumber: baseBlock
+        }),
+        viemClient.readContract({
+          address: config.baseTokenAddress as Address,
+          abi: erc20Abi,
+          functionName: 'balanceOf',
+          args: [config.stakingRewardControllerAddress as Address],
+          blockNumber: baseBlock
+        }),
+        investorsTeamLockedPromise,
+        viemClient.readContract({
+          address: config.baseTokenAddress as Address,
+          abi: erc20Abi,
+          functionName: 'balanceOf',
+          args: [config.daoTreasuryAddress as Address],
+          blockNumber: baseBlock
+        }),
+        viemClient.readContract({
+          address: config.baseTokenAddress as Address,
+          abi: erc20Abi,
+          functionName: 'balanceOf',
+          args: [config.epProgramManager as Address],
+          blockNumber: baseBlock
+        }),
+        viemClient.readContract({
+          address: config.baseTokenAddress as Address,
+          abi: erc20Abi,
+          functionName: 'balanceOf',
+          args: [config.vestingTreasuryAddress as Address],
+          blockNumber: baseBlock
+        }),
+        viemClient.readContract({
+          address: config.taxDistributionPool as Address,
+          abi: SUPERFLUID_POOL_ABI,
+          functionName: 'getTotalUnits',
+          args: [],
+          blockNumber: baseBlock
+        })
+      ]);
+
+      // derive reserve balances: what went into programManager minuts its current balance
+      const [transfersOutWei, transfersInWei] = await Promise.all([
+        sumProgramManagerTransfers('out', baseBlock, tokenAddress, programManagerAddress),
+        sumProgramManagerTransfers('in', baseBlock, tokenAddress, programManagerAddress)
+      ]);
+      console.log(`  transfersOutWei: ${transfersOutWei.toString()}, transfersInWei: ${transfersInWei.toString()}`);
+
+      const [streamsOut, streamsIn] = await Promise.all([
+        fetchProgramManagerStreamsAtBlock('out', baseBlock, tokenAddress, programManagerAddress),
+        fetchProgramManagerStreamsAtBlock('in', baseBlock, tokenAddress, programManagerAddress)
+      ]);
+      // log streamsOut
+      console.log(`  streamsOut at block ${baseBlock.toString()}: ${safeStringify(streamsOut, 2)}`);
+
+      const streamedOutWei = sumStreamAmounts(streamsOut, timestamp);
+      const streamedInWei = sumStreamAmounts(streamsIn, timestamp);
+
+      console.log(`transfersOutWei: ${transfersOutWei.toString()}, streamedOutWei: ${streamedOutWei.toString()}`);
+
+      const reserveBalances = toTokenNumber(transfersInWei + streamedInWei - programManagerBalance);
+
+      const foundationTreasuryBalanceWei = await ethereumClient.readContract({
+        address: config.ethereumTokenAddress as Address,
+        abi: erc20Abi,
+        functionName: 'balanceOf',
+        args: [config.foundationTreasuryAddress as Address],
+        blockNumber: ethereumBlock
+      });
+
+      const stakedSup = Number(taxDistributionUnits as bigint);
+      const communityCharge = toTokenNumber(communityChargeBalance as bigint);
+      const investorsTeamLocked = toTokenNumber(investorsTeamLockedWei as bigint);
+      const daoTreasuryUnlocked = toTokenNumber(daoTreasuryBalanceWei as bigint);
+      const daoSPRProgramManager = toTokenNumber(sprProgramManagerBalanceWei as bigint);
+      const vestingTreasury = toTokenNumber(vestingTreasuryBalanceWei as bigint);
+      const foundationTreasury = toTokenNumber(foundationTreasuryBalanceWei as bigint);
+
+      const vestingSchedules = await getVestingSchedules(null, [config.daoTreasuryAddress], true, baseBlock);
+      let totalVestingAmount = 0n;
+      for (const schedule of vestingSchedules) {
+        if (schedule.endDate > timestamp) {
+          const timeRemaining = schedule.endDate - timestamp;
+          if (timeRemaining > 0) {
+            totalVestingAmount += schedule.flowRate * BigInt(timeRemaining);
+          }
+        }
+      }
+      const daoTreasuryLocked = toTokenNumber(totalVestingAmount);
+      const daoTreasury = daoTreasuryUnlocked + daoTreasuryLocked;
+
+      const lpSup = 0; // TODO: derive LP SUP historically
+      const streamingOut = 0; // TODO: derive streaming out historically
+      const lockerBalances = reserveBalances - (stakedSup + lpSup + streamingOut);
+
+      const totalSupply = 1000000000;
+      const otherRaw = totalSupply -
+        (reserveBalances + communityCharge + investorsTeamLocked + daoTreasury + foundationTreasury + daoSPRProgramManager + vestingTreasury);
+      const other = otherRaw < 0 ? 0 : otherRaw;
+
+      snapshots.push({
+        timestamp,
+        reserveBalances,
+        lockerBalances,
+        stakedSup,
+        lpSup,
+        streamingOut,
+        communityCharge,
+        investorsTeamLocked,
+        daoTreasury,
+        daoTreasuryUnlocked,
+        daoTreasuryLocked,
+        daoSPRProgramManager,
+        foundationTreasury,
+        vestingTreasury,
+        other,
+        totalSupply
+      });
+      console.log(`[HistoricalMetrics] Snapshot for ${new Date(timestamp * 1000).toISOString().slice(0, 10)}: ${safeStringify(snapshots[snapshots.length - 1], 2)}`);
+    } catch (error) {
+      // Silently swallow errors and continue to next timestamp
+      console.warn(`Skipping timestamp ${timestamp} due to error: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  return snapshots;
+}
+
+async function refreshHistoricalDistributionMetricsIfNeeded(): Promise<void> {
+  const refreshFlag = process.env.REFRESH_HISTORICAL_STATE;
+  if (!refreshFlag || refreshFlag.toLowerCase() !== 'true') {
+    return;
+  }
+
+  try {
+    // TODO: make configurable
+    const startTimestamp = Math.floor(Date.UTC(2025, 1, 19, 0, 0, 0) / 1000);
+    const now = new Date();
+    const endTimestamp = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0) / 1000);
+
+    const historicalSnapshots = await fetchHistoricalDistributionMetrics(startTimestamp, endTimestamp);
+    const lastUpdatedAt = Math.floor(Date.now() / 1000);
+
+    const payload: MetricsData<DistributionMetricsHistoryEntry[]> = {
+      schemaVersion: HISTORY_FILE_SCHEMA_VERSION,
+      lastUpdatedAt,
+      data: historicalSnapshots
+    };
+
+    historicalDistributionMetrics = payload;
+    saveHistoricalDistributionMetricsToDisk(payload);
+  } catch (error) {
+    console.error('Failed to refresh historical distribution metrics:', error);
+  }
 }
 
 // Helper function to format axios errors

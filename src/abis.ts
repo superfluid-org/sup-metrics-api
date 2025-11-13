@@ -48,3 +48,13 @@ export const SUP_VESTING_FACTORY_ABI = [
   }
 ] as const;
 
+export const SUPERFLUID_POOL_ABI = [
+  {
+    inputs: [],
+    name: 'getTotalUnits',
+    outputs: [{ type: 'uint256' }],
+    stateMutability: 'view',
+    type: 'function'
+  }
+] as const;
+

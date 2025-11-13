@@ -156,6 +156,11 @@ export interface DistributionMetrics {
 
 export type DistributionMetricsAggregate = Omit<DistributionMetrics, 'lockers'>;
 
+export interface DistributionMetricsHistoryEntry extends DistributionMetricsAggregate {
+  /** Snapshot timestamp at midnight UTC */
+  timestamp: number;
+}
+
 /**
  * Response for distribution metrics endpoint (without per-locker breakdown)
  */
@@ -163,6 +168,13 @@ export interface DistributionMetricsResponse {
   /** Distribution metrics data */
   metrics: DistributionMetricsAggregate;
   /** Unix timestamp of last update */
+  lastUpdatedAt: number;
+}
+
+export interface DistributionMetricsHistoryResponse {
+  /** Historical distribution metrics snapshots ordered by timestamp asc */
+  metrics: DistributionMetricsHistoryEntry[];
+  /** Unix timestamp when the historical snapshots were last refreshed */
   lastUpdatedAt: number;
 }
 

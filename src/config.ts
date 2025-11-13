@@ -28,6 +28,7 @@ export const config = {
   lockerFactoryAddress: process.env.LOCKER_FACTORY_ADDRESS || '0xA6694cAB43713287F7735dADc940b555db9d39D9',
   additionalTotalVp: process.env.ADDITIONAL_TOTAL_VP || '0',
   epProgramManager: process.env.EP_PROGRAM_MANAGER || '0x1e32cf099992E9D3b17eDdDFFfeb2D07AED95C6a',
+  taxDistributionPool: process.env.TAX_DISTRIBUTION_POOL || '0xF0f494f4BD2C3A6bF8b49E6f798875301d944C0A',
   vestingFactoryAddress: process.env.VESTING_FACTORY_ADDRESS || '0x3DF8A6558073e973f4c3979138Cca836C993E285', // aka lockedSUP aka vSUP
   stakingRewardControllerAddress: process.env.STAKING_REWARD_CONTROLLER_ADDRESS || '0xb19Ae25A98d352B36CED60F93db926247535048b',
   daoTreasuryAddress: process.env.DAO_TREASURY_ADDRESS || '0xac808840f02c47C05507f48165d2222FF28EF4e1',

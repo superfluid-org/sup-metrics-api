@@ -7,7 +7,8 @@ import {
   getDelegateForUser,
   getTotalScore,
   getDaoMembersWithFilters,
-  getDistributionMetrics
+  getDistributionMetrics,
+  getDistributionMetricsHistory
 } from '../metrics';
 import {
   DaoMembersCountResponse,
@@ -17,7 +18,8 @@ import {
   ConfigResponse,
   TotalScoreResponse,
   DaoMembersResponse,
-  DistributionMetricsResponse
+  DistributionMetricsResponse,
+  DistributionMetricsHistoryResponse
 } from '../types';
 import { config } from '../config';
 
@@ -152,6 +154,19 @@ export class MetricsController extends Controller {
       metrics: distributionMetrics.metrics,
       lastUpdatedAt: distributionMetrics.lastUpdatedAt
     };
+  }
+
+  /**
+   * Get historical SUP token distribution metrics.<br><br>
+   *
+   * Returns daily snapshots of distribution metrics starting from 2025-02-17 (TGE).<br>
+   * Each entry represents the token allocation state at midnight UTC of the respective day.<br><br>
+   *
+   * When REFRESH_HISTORICAL_STATE=true the backend refreshes the full history on startup.<br>
+   */
+  @Get('/distribution_metrics_history')
+  public getDistributionMetricsHistory(): DistributionMetricsHistoryResponse {
+    return getDistributionMetricsHistory();
   }
 
   /**
