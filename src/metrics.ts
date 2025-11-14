@@ -1941,7 +1941,7 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
     // Get SUP owned by the Corp ops on Ethereum
     console.log('Fetching SUP owned by the Corp ops on Ethereum...');
     const supCorpOpsEthereumBalance = await ethereumViemClient.readContract({
-      address: config.baseTokenAddress as Address,
+      address: config.ethereumTokenAddress as Address,
       abi: erc20Abi,
       functionName: 'balanceOf',
       args: [config.supCorpOpsAddress as Address]
