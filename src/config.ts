@@ -41,6 +41,7 @@ export const config = {
   port: parseInt(process.env.PORT || '3000', 10),
   votingMetricsUpdateInterval: parseInt(process.env.VOTING_METRICS_UPDATE_INTERVAL || '86400', 10),
   distributionMetricsUpdateInterval: parseInt(process.env.DISTRIBUTION_METRICS_UPDATE_INTERVAL || '86400', 10),
+  distributionMetrics2UpdateInterval: parseInt(process.env.DISTRIBUTION_METRICS_2_UPDATE_INTERVAL || '86400', 10),
   vpCalcChunkSize: parseInt(process.env.VP_CALC_CHUNK_SIZE || '5000', 10),
 }; 
 

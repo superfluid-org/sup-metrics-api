@@ -8,6 +8,7 @@ import {
   getTotalScore,
   getDaoMembersWithFilters,
   getDistributionMetrics,
+  getDistributionMetrics2,
   getDistributionMetricsHistory
 } from '../metrics';
 import {
@@ -154,6 +155,20 @@ export class MetricsController extends Controller {
       metrics: distributionMetrics.metrics,
       lastUpdatedAt: distributionMetrics.lastUpdatedAt
     };
+  }
+
+  /**
+   * Get SUP token distribution metrics (alternative calculation method).<br><br>
+   * 
+   * Returns the same metrics as /distribution_metrics but calculated using the historical snapshot method<br>
+   * (derived from transfers and streams without enumerating all lockers).<br>
+   * The lockers array is always empty in this endpoint.<br><br>
+   * 
+   * This metrics is periodically updated in the background. The last update timestamp is returned.
+   */
+  @Get('/distribution_metrics_2')
+  public getDistributionMetrics2(): DistributionMetricsResponse {
+    return getDistributionMetrics2();
   }
 
   /**

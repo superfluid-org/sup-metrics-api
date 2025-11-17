@@ -10,6 +10,7 @@ import {
   DaoMember,
   DaoMembersResponse,
   DistributionMetrics,
+  DistributionMetricsAggregate,
   DistributionMetricsResponse,
   VestingSchedule,
   LockerBreakdown,
@@ -311,6 +312,71 @@ const distributionMetricsManager = new MetricsManager<DistributionMetrics>(
   config.distributionMetricsUpdateInterval
 );
 
+async function fetchDistributionMetrics2(): Promise<DistributionMetricsAggregate> {
+  const timestamp = Math.floor(Date.now() / 1000);
+  
+  const ethereumClient = createPublicClient({
+    chain: mainnet,
+    transport: http(config.ethereumRpcUrl, {
+      batch: {
+        wait: 100
+      }
+    }),
+  });
+
+  const latestBaseBlock = await viemClient.getBlockNumber();
+  const latestEthereumBlock = await ethereumClient.getBlockNumber();
+
+  const baseBlock = await getBlockNumberAtOrBefore(
+    viemClient,
+    timestamp,
+    baseBlockNumberCache,
+    0n,
+    latestBaseBlock,
+    BASE_BLOCK_TIME_SECONDS
+  );
+  const ethereumBlock = await getBlockNumberAtOrBefore(
+    ethereumClient,
+    timestamp,
+    ethereumBlockNumberCache,
+    0n,
+    latestEthereumBlock,
+    ETHEREUM_BLOCK_TIME_SECONDS
+  );
+
+  const snapshot = await calculateDistributionMetricsAtTimestamp(timestamp, baseBlock, ethereumBlock);
+  
+  // Return without timestamp and with empty lockers array
+  const { timestamp: _, ...metrics } = snapshot;
+  return metrics;
+}
+
+// Create distribution metrics 2 manager instance
+const distributionMetrics2Manager = new MetricsManager<DistributionMetricsAggregate>(
+  {
+    reserveBalances: 0,
+    lockerBalances: 0,
+    stakedSup: 0,
+    lpSup: 0,
+    streamingOut: 0,
+    communityCharge: 0,
+    investorsTeamLocked: 0,
+    daoTreasury: 0,
+    daoTreasuryUnlocked: 0,
+    daoTreasuryLocked: 0,
+    daoSPRProgramManager: 0,
+    foundationTreasury: 0,
+    vestingTreasury: 0,
+    supCorpOps: 0,
+    other: 0,
+    totalSupply: 1000000000, // 1B SUP tokens
+  },
+  fetchDistributionMetrics2,
+  "distributionMetrics2.json",
+  DISTRIBUTION_METRICS_FILE_SCHEMA_VERSION,
+  config.distributionMetrics2UpdateInterval
+);
+
 loadHistoricalDistributionMetricsFromDisk();
 if (process.env.REFRESH_HISTORICAL_STATE && process.env.REFRESH_HISTORICAL_STATE.toLowerCase() === 'true') {
   void refreshHistoricalDistributionMetricsIfNeeded();
@@ -472,6 +538,14 @@ export const getDistributionMetrics = (): DistributionMetricsResponse => {
   const { lockers, ...distributionMetrics } = distributionData;
   return {
     metrics: distributionMetrics,
+    lastUpdatedAt
+  };
+};
+
+export const getDistributionMetrics2 = (): DistributionMetricsResponse => {
+  const { data: distributionData, lastUpdatedAt } = distributionMetrics2Manager.getData();
+  return {
+    metrics: distributionData,
     lastUpdatedAt
   };
 };
@@ -678,6 +752,206 @@ function sumStreamAmounts(streams: ProgramManagerStreamState[], refTimestamp: nu
   }, 0n);
 }
 
+async function calculateDistributionMetricsAtTimestamp(
+  timestamp: number,
+  baseBlock: bigint,
+  ethereumBlock: bigint
+): Promise<DistributionMetricsHistoryEntry> {
+  const programManagerAddress = config.epProgramManager.toLowerCase();
+  const tokenAddress = config.baseTokenAddress.toLowerCase();
+
+  const ethereumClient = createPublicClient({
+    chain: mainnet,
+    transport: http(config.ethereumRpcUrl, {
+      batch: {
+        wait: 100
+      }
+    }),
+  });
+
+  const investorsTeamLockedPromise: Promise<bigint> =
+    baseBlock >= VESTING_FACTORY_DEPLOYMENT_BLOCK
+      ? (viemClient.readContract({
+          address: config.vestingFactoryAddress as Address,
+          abi: SUP_VESTING_FACTORY_ABI,
+          functionName: 'totalSupply',
+          args: [],
+          blockNumber: baseBlock
+        }) as Promise<bigint>).catch(() => 0n)
+      : Promise.resolve<bigint>(0n);
+
+  const [
+    programManagerBalance,
+    communityChargeBalance,
+    investorsTeamLockedWei,
+    daoTreasuryBalanceWei,
+    sprProgramManagerBalanceWei,
+    vestingTreasuryBalanceWei,
+    taxDistributionUnits,
+    supCorpTreasuryBalanceWei,
+    supCorpOpsBalanceWei,
+  ] = await Promise.all([
+    viemClient.readContract({
+      address: config.baseTokenAddress as Address,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [config.epProgramManager as Address],
+      blockNumber: baseBlock
+    }),
+    viemClient.readContract({
+      address: config.baseTokenAddress as Address,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [config.stakingRewardControllerAddress as Address],
+      blockNumber: baseBlock
+    }),
+    investorsTeamLockedPromise,
+    viemClient.readContract({
+      address: config.baseTokenAddress as Address,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [config.daoTreasuryAddress as Address],
+      blockNumber: baseBlock
+    }),
+    viemClient.readContract({
+      address: config.baseTokenAddress as Address,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [config.epProgramManager as Address],
+      blockNumber: baseBlock
+    }),
+    viemClient.readContract({
+      address: config.baseTokenAddress as Address,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [config.vestingTreasuryAddress as Address],
+      blockNumber: baseBlock
+    }),
+    viemClient.readContract({
+      address: config.taxDistributionPool as Address,
+      abi: SUPERFLUID_POOL_ABI,
+      functionName: 'getTotalUnits',
+      args: [],
+      blockNumber: baseBlock
+    }),
+    viemClient.readContract({
+      address: config.baseTokenAddress as Address,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [config.supCorpTreasuryAddress as Address],
+      blockNumber: baseBlock
+    }),
+    viemClient.readContract({
+      address: config.baseTokenAddress as Address,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [config.supCorpOpsAddress as Address],
+      blockNumber: baseBlock
+    })
+  ]);
+
+  // derive reserve balances: what went into programManager minuts its current balance
+  const [transfersOutWei, transfersInWei] = await Promise.all([
+    sumProgramManagerTransfers('out', baseBlock, tokenAddress, programManagerAddress),
+    sumProgramManagerTransfers('in', baseBlock, tokenAddress, programManagerAddress)
+  ]);
+  console.log(`  transfersOutWei: ${transfersOutWei.toString()}, transfersInWei: ${transfersInWei.toString()}`);
+
+  const [streamsOut, streamsIn] = await Promise.all([
+    fetchProgramManagerStreamsAtBlock('out', baseBlock, tokenAddress, programManagerAddress),
+    fetchProgramManagerStreamsAtBlock('in', baseBlock, tokenAddress, programManagerAddress)
+  ]);
+  // log streamsOut
+  console.log(`  streamsOut at block ${baseBlock.toString()}: ${safeStringify(streamsOut, 2)}`);
+
+  const streamedOutWei = sumStreamAmounts(streamsOut, timestamp);
+  const streamedInWei = sumStreamAmounts(streamsIn, timestamp);
+
+  console.log(`transfersOutWei: ${transfersOutWei.toString()}, streamedOutWei: ${streamedOutWei.toString()}`);
+
+  const reserveBalances = toTokenNumber(transfersInWei + streamedInWei - programManagerBalance);
+
+  const foundationTreasuryBalanceWei = await ethereumClient.readContract({
+    address: config.ethereumTokenAddress as Address,
+    abi: erc20Abi,
+    functionName: 'balanceOf',
+    args: [config.foundationTreasuryAddress as Address],
+    blockNumber: ethereumBlock
+  });
+
+  const supCorpTreasuryEthereumBalanceWei = await ethereumClient.readContract({
+    address: config.ethereumTokenAddress as Address,
+    abi: erc20Abi,
+    functionName: 'balanceOf',
+    args: [config.supCorpTreasuryAddress as Address],
+    blockNumber: ethereumBlock
+  });
+
+  const supCorpOpsEthereumBalanceWei = await ethereumClient.readContract({
+    address: config.ethereumTokenAddress as Address,
+    abi: erc20Abi,
+    functionName: 'balanceOf',
+    args: [config.supCorpOpsAddress as Address],
+    blockNumber: ethereumBlock
+  });
+
+  console.log(`  supCorpTreasuryEthereumBalanceWei: ${supCorpTreasuryEthereumBalanceWei.toString()}, supCorpOpsEthereumBalanceWei: ${supCorpOpsEthereumBalanceWei.toString()}`);
+
+  const stakedSup = Number(taxDistributionUnits as bigint);
+  const communityCharge = toTokenNumber(communityChargeBalance as bigint);
+  const investorsTeamLocked = toTokenNumber(investorsTeamLockedWei as bigint);
+  const daoTreasuryUnlocked = toTokenNumber(daoTreasuryBalanceWei as bigint);
+  const daoSPRProgramManager = toTokenNumber(sprProgramManagerBalanceWei as bigint);
+  const vestingTreasury = toTokenNumber(vestingTreasuryBalanceWei as bigint);
+  const foundationTreasury = toTokenNumber(foundationTreasuryBalanceWei as bigint);
+  // SUP corp treasury on Ethereum is considered ops
+  const supCorpOps = toTokenNumber(supCorpOpsBalanceWei + supCorpOpsEthereumBalanceWei + supCorpTreasuryEthereumBalanceWei);
+  console.log(`  supCorpOps: ${supCorpOps}, supCorpOpsBalanceWei: ${supCorpOpsBalanceWei.toString()}, supCorpOpsEthereumBalanceWei: ${supCorpOpsEthereumBalanceWei.toString()}, supCorpTreasuryEthereumBalanceWei: ${supCorpTreasuryEthereumBalanceWei.toString()}`);
+
+  const vestingSchedules = await getVestingSchedules(null, [config.daoTreasuryAddress], true, baseBlock);
+  let totalVestingAmount = 0n;
+  for (const schedule of vestingSchedules) {
+    if (schedule.endDate > timestamp) {
+      const timeRemaining = schedule.endDate - timestamp;
+      if (timeRemaining > 0) {
+        totalVestingAmount += schedule.flowRate * BigInt(timeRemaining);
+      }
+    }
+  }
+  // before the vesting was created, all the amount of supCorpTreasury shall be associated to DAO locked
+  const daoTreasuryLocked = totalVestingAmount === 0n ? toTokenNumber(supCorpTreasuryBalanceWei as bigint) : toTokenNumber(totalVestingAmount);
+  const daoTreasury = daoTreasuryUnlocked + daoTreasuryLocked;
+
+  const lpSup = 0; // TODO: derive LP SUP historically
+  const streamingOut = 0; // TODO: derive streaming out historically
+  const lockerBalances = reserveBalances - (stakedSup + lpSup + streamingOut);
+
+  const totalSupply = 1000000000;
+  const otherRaw = totalSupply -
+    (reserveBalances + communityCharge + investorsTeamLocked + daoTreasury + foundationTreasury + daoSPRProgramManager + vestingTreasury + supCorpOps);
+  const other = otherRaw < 0 ? 0 : otherRaw;
+
+  return {
+    timestamp,
+    reserveBalances,
+    lockerBalances,
+    stakedSup,
+    lpSup,
+    streamingOut,
+    communityCharge,
+    investorsTeamLocked,
+    daoTreasury,
+    daoTreasuryUnlocked,
+    daoTreasuryLocked,
+    daoSPRProgramManager,
+    foundationTreasury,
+    vestingTreasury,
+    supCorpOps,
+    other,
+    totalSupply
+  };
+}
+
 async function fetchHistoricalDistributionMetrics(
   startTimestamp: number,
   endTimestamp: number,
@@ -690,8 +964,6 @@ async function fetchHistoricalDistributionMetrics(
   console.log(`Starting historical distribution metrics fetch from ${new Date(startTimestamp * 1000).toISOString()} to ${new Date(endTimestamp * 1000).toISOString()}`);
 
   const snapshots: DistributionMetricsHistoryEntry[] = [];
-  const programManagerAddress = config.epProgramManager.toLowerCase();
-  const tokenAddress = config.baseTokenAddress.toLowerCase();
 
   const ethereumClient = createPublicClient({
     chain: mainnet,
@@ -732,189 +1004,9 @@ async function fetchHistoricalDistributionMetrics(
       previousBaseBlock = baseBlock;
       previousEthereumBlock = ethereumBlock;
 
-      const investorsTeamLockedPromise: Promise<bigint> =
-        baseBlock >= VESTING_FACTORY_DEPLOYMENT_BLOCK
-          ? (viemClient.readContract({
-              address: config.vestingFactoryAddress as Address,
-              abi: SUP_VESTING_FACTORY_ABI,
-              functionName: 'totalSupply',
-              args: [],
-              blockNumber: baseBlock
-            }) as Promise<bigint>).catch(() => 0n)
-          : Promise.resolve<bigint>(0n);
-
-      const [
-        programManagerBalance,
-        communityChargeBalance,
-        investorsTeamLockedWei,
-        daoTreasuryBalanceWei,
-        sprProgramManagerBalanceWei,
-        vestingTreasuryBalanceWei,
-        taxDistributionUnits,
-        supCorpTreasuryBalanceWei,
-        supCorpOpsBalanceWei,
-      ] = await Promise.all([
-        viemClient.readContract({
-          address: config.baseTokenAddress as Address,
-          abi: erc20Abi,
-          functionName: 'balanceOf',
-          args: [config.epProgramManager as Address],
-          blockNumber: baseBlock
-        }),
-        viemClient.readContract({
-          address: config.baseTokenAddress as Address,
-          abi: erc20Abi,
-          functionName: 'balanceOf',
-          args: [config.stakingRewardControllerAddress as Address],
-          blockNumber: baseBlock
-        }),
-        investorsTeamLockedPromise,
-        viemClient.readContract({
-          address: config.baseTokenAddress as Address,
-          abi: erc20Abi,
-          functionName: 'balanceOf',
-          args: [config.daoTreasuryAddress as Address],
-          blockNumber: baseBlock
-        }),
-        viemClient.readContract({
-          address: config.baseTokenAddress as Address,
-          abi: erc20Abi,
-          functionName: 'balanceOf',
-          args: [config.epProgramManager as Address],
-          blockNumber: baseBlock
-        }),
-        viemClient.readContract({
-          address: config.baseTokenAddress as Address,
-          abi: erc20Abi,
-          functionName: 'balanceOf',
-          args: [config.vestingTreasuryAddress as Address],
-          blockNumber: baseBlock
-        }),
-        viemClient.readContract({
-          address: config.taxDistributionPool as Address,
-          abi: SUPERFLUID_POOL_ABI,
-          functionName: 'getTotalUnits',
-          args: [],
-          blockNumber: baseBlock
-        }),
-        viemClient.readContract({
-          address: config.baseTokenAddress as Address,
-          abi: erc20Abi,
-          functionName: 'balanceOf',
-          args: [config.supCorpTreasuryAddress as Address],
-          blockNumber: baseBlock
-        }),
-        viemClient.readContract({
-          address: config.baseTokenAddress as Address,
-          abi: erc20Abi,
-          functionName: 'balanceOf',
-          args: [config.supCorpOpsAddress as Address],
-          blockNumber: baseBlock
-        })
-      ]);
-
-      // derive reserve balances: what went into programManager minuts its current balance
-      const [transfersOutWei, transfersInWei] = await Promise.all([
-        sumProgramManagerTransfers('out', baseBlock, tokenAddress, programManagerAddress),
-        sumProgramManagerTransfers('in', baseBlock, tokenAddress, programManagerAddress)
-      ]);
-      console.log(`  transfersOutWei: ${transfersOutWei.toString()}, transfersInWei: ${transfersInWei.toString()}`);
-
-      const [streamsOut, streamsIn] = await Promise.all([
-        fetchProgramManagerStreamsAtBlock('out', baseBlock, tokenAddress, programManagerAddress),
-        fetchProgramManagerStreamsAtBlock('in', baseBlock, tokenAddress, programManagerAddress)
-      ]);
-      // log streamsOut
-      console.log(`  streamsOut at block ${baseBlock.toString()}: ${safeStringify(streamsOut, 2)}`);
-
-      const streamedOutWei = sumStreamAmounts(streamsOut, timestamp);
-      const streamedInWei = sumStreamAmounts(streamsIn, timestamp);
-
-      console.log(`transfersOutWei: ${transfersOutWei.toString()}, streamedOutWei: ${streamedOutWei.toString()}`);
-
-      const reserveBalances = toTokenNumber(transfersInWei + streamedInWei - programManagerBalance);
-
-      const foundationTreasuryBalanceWei = await ethereumClient.readContract({
-        address: config.ethereumTokenAddress as Address,
-        abi: erc20Abi,
-        functionName: 'balanceOf',
-        args: [config.foundationTreasuryAddress as Address],
-        blockNumber: ethereumBlock
-      });
-
-
-      const supCorpTreasuryEthereumBalanceWei = await ethereumClient.readContract({
-        address: config.ethereumTokenAddress as Address,
-        abi: erc20Abi,
-        functionName: 'balanceOf',
-        args: [config.supCorpTreasuryAddress as Address],
-        blockNumber: ethereumBlock
-      });
-
-      const supCorpOpsEthereumBalanceWei = await ethereumClient.readContract({
-        address: config.ethereumTokenAddress as Address,
-        abi: erc20Abi,
-        functionName: 'balanceOf',
-        args: [config.supCorpOpsAddress as Address],
-        blockNumber: ethereumBlock
-      });
-    
-      console.log(`  supCorpTreasuryEthereumBalanceWei: ${supCorpTreasuryEthereumBalanceWei.toString()}, supCorpOpsEthereumBalanceWei: ${supCorpOpsEthereumBalanceWei.toString()}`);
-
-      const stakedSup = Number(taxDistributionUnits as bigint);
-      const communityCharge = toTokenNumber(communityChargeBalance as bigint);
-      const investorsTeamLocked = toTokenNumber(investorsTeamLockedWei as bigint);
-      const daoTreasuryUnlocked = toTokenNumber(daoTreasuryBalanceWei as bigint);
-      const daoSPRProgramManager = toTokenNumber(sprProgramManagerBalanceWei as bigint);
-      const vestingTreasury = toTokenNumber(vestingTreasuryBalanceWei as bigint);
-      const foundationTreasury = toTokenNumber(foundationTreasuryBalanceWei as bigint);
-      // SUP corp treasury on Ethereum is considered ops
-      const supCorpOps = toTokenNumber(supCorpOpsBalanceWei + supCorpOpsEthereumBalanceWei + supCorpTreasuryEthereumBalanceWei);
-      console.log(`  supCorpOps: ${supCorpOps}, supCorpOpsBalanceWei: ${supCorpOpsBalanceWei.toString()}, supCorpOpsEthereumBalanceWei: ${supCorpOpsEthereumBalanceWei.toString()}, supCorpTreasuryEthereumBalanceWei: ${supCorpTreasuryEthereumBalanceWei.toString()}`);
-
-      const vestingSchedules = await getVestingSchedules(null, [config.daoTreasuryAddress], true, baseBlock);
-      let totalVestingAmount = 0n;
-      for (const schedule of vestingSchedules) {
-        if (schedule.endDate > timestamp) {
-          const timeRemaining = schedule.endDate - timestamp;
-          if (timeRemaining > 0) {
-            totalVestingAmount += schedule.flowRate * BigInt(timeRemaining);
-          }
-        }
-      }
-      // before the vesting was created, all the amount of supCorpTreasury shall be associated to DAO locked
-      const daoTreasuryLocked = totalVestingAmount === 0n ? toTokenNumber(supCorpTreasuryBalanceWei as bigint) : toTokenNumber(totalVestingAmount);
-      const daoTreasury = daoTreasuryUnlocked + daoTreasuryLocked;
-
-      const lpSup = 0; // TODO: derive LP SUP historically
-      const streamingOut = 0; // TODO: derive streaming out historically
-      const lockerBalances = reserveBalances - (stakedSup + lpSup + streamingOut);
-
-      const totalSupply = 1000000000;
-      const otherRaw = totalSupply -
-        (reserveBalances + communityCharge + investorsTeamLocked + daoTreasury + foundationTreasury + daoSPRProgramManager + vestingTreasury + supCorpOps);
-      const other = otherRaw < 0 ? 0 : otherRaw;
-
-      snapshots.push({
-        timestamp,
-        reserveBalances,
-        lockerBalances,
-        stakedSup,
-        lpSup,
-        streamingOut,
-        communityCharge,
-        investorsTeamLocked,
-        daoTreasury,
-        daoTreasuryUnlocked,
-        daoTreasuryLocked,
-        daoSPRProgramManager,
-        foundationTreasury,
-        vestingTreasury,
-        supCorpOps,
-        other,
-        totalSupply
-      });
-      console.log(`[HistoricalMetrics] Snapshot for ${new Date(timestamp * 1000).toISOString().slice(0, 10)}: ${safeStringify(snapshots[snapshots.length - 1], 2)}`);
+      const snapshot = await calculateDistributionMetricsAtTimestamp(timestamp, baseBlock, ethereumBlock);
+      snapshots.push(snapshot);
+      console.log(`[HistoricalMetrics] Snapshot for ${new Date(timestamp * 1000).toISOString().slice(0, 10)}: ${safeStringify(snapshot, 2)}`);
     } catch (error) {
       // Silently swallow errors and continue to next timestamp
       console.warn(`Skipping timestamp ${timestamp} due to error: ${error instanceof Error ? error.message : String(error)}`);
