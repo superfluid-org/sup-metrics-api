@@ -36,7 +36,8 @@ export const config = {
   vestingTreasuryAddress: process.env.VESTING_TREASURY_ADDRESS || '0x5c0fdb8602d5721276179c51c81f0e50e36846a4',
   supCorpTreasuryAddress: process.env.SUP_CORP_TREASURY_ADDRESS || '0x48f1762b05a811de8693d0bdb146542e1ae5a0da',
   supCorpOpsAddress: process.env.SUP_CORP_OPS_ADDRESS || '0x9851626c2BBA2b019a2c859e5e80DA62A021024c',
-  
+  uniswapV3PoolAddress: process.env.UNISWAP_V3_POOL_ADDRESS || '0xBa154BEAa14172fF9384B82499732c669527d85D',
+
   // App
   port: parseInt(process.env.PORT || '3000', 10),
   votingMetricsUpdateInterval: parseInt(process.env.VOTING_METRICS_UPDATE_INTERVAL || '86400', 10),

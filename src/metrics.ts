@@ -20,8 +20,9 @@ import {
 import snapshot from '@snapshot-labs/snapshot.js';
 import snapshotStrategies from '@d10r/snapshot-strategies';
 import { createPublicClient, http, Address, erc20Abi } from 'viem';
+import { formatUnits } from 'viem';
 import { base, mainnet } from 'viem/chains'
-import { LOCKER_ABI, SUP_VESTING_FACTORY_ABI, SUPERFLUID_POOL_ABI } from './abis';
+import { LOCKER_ABI, SUP_VESTING_FACTORY_ABI, SUPERFLUID_POOL_ABI, UNISWAP_V3_POOL_ABI } from './abis';
 import { 
   safeStringify, 
   toTokenNumber, 
@@ -312,6 +313,7 @@ const distributionMetricsManager = new MetricsManager<DistributionMetrics>(
   config.distributionMetricsUpdateInterval
 );
 
+// lightweight calculation which just queries aggregates and omits the list of lockers
 async function fetchDistributionMetrics2(): Promise<DistributionMetricsAggregate> {
   const timestamp = Math.floor(Date.now() / 1000);
   
@@ -1689,6 +1691,20 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
 
     console.log(`Found ${lockers.length} lockers`);
 
+    // Get sqrtPriceX96 once from the Uniswap V3 pool
+    console.log('Fetching Uniswap V3 pool price...');
+    const poolSlot0 = await viemClient.readContract({
+      address: config.uniswapV3PoolAddress as Address,
+      abi: UNISWAP_V3_POOL_ABI,
+      functionName: 'slot0',
+    });
+    const sqrtPriceX96 = poolSlot0[0] as bigint;
+    console.log(`Pool sqrtPriceX96: ${sqrtPriceX96.toString()}`);
+
+    // Constants for LP calculation
+    const Q96 = 1n << 96n;
+    const MIN_SQRT_RATIO = 4295128739n;
+
     const batchSize = 100;
     // Map locker address -> {owner, staked, lp, fontaines, available}
     const lockerMap = new Map<string, {owner: string, staked: bigint, lp: bigint, fontaines: bigint, available: bigint}>();
@@ -1715,6 +1731,15 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
         })
       );
 
+      const liquidityBalancePromises = batch.map(lockerAddress =>
+        viemClient.readContract({
+          address: lockerAddress as Address,
+          abi: LOCKER_ABI,
+          functionName: 'getLiquidityBalance',
+          args: []
+        })
+      );
+
       const ownerPromises = batch.map(lockerAddress =>
         viemClient.readContract({
           address: lockerAddress as Address,
@@ -1724,23 +1749,27 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
         }).catch(() => null)
       );
 
-      // LP balance not yet available, use placeholder
-      const lpPromises = batch.map(_ => BigInt(0));
-
-      const [availableBalances, stakedBalances, lpBalances, owners] = await Promise.all([
+      const [availableBalances, stakedBalances, liquidityBalances, owners] = await Promise.all([
         Promise.all(availableBalancePromises),
         Promise.all(stakedBalancePromises),
-        Promise.all(lpPromises),
+        Promise.all(liquidityBalancePromises),
         Promise.all(ownerPromises)
       ]);
 
-      // Track per-locker data
+      // Compute SUP denominated LP amounts from liquidity balances
+      const lpBalances = liquidityBalances.map(liquidityBalance => {
+        const liquidity = liquidityBalance as bigint;
+        // Exact: amount1 = L * (sqrtPriceX96 - MIN_SQRT_RATIO) / Q96
+        return (liquidity * (sqrtPriceX96 - MIN_SQRT_RATIO)) / Q96;
+      });
+
+      // Track per-locker data and log detailed info for non-zero liquidity balances
       batch.forEach((lockerAddress, idx) => {
         lockerMap.set(lockerAddress.toLowerCase(), {
           owner: owners[idx] ? (owners[idx] as Address).toLowerCase() : '',
           staked: stakedBalances[idx] as bigint,
           lp: lpBalances[idx] as bigint,
-          fontaines: BigInt(0),
+          fontaines: BigInt(0), // placeholder, added as next step
           available: availableBalances[idx] as bigint
         });
       });

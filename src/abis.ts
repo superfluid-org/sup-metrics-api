@@ -58,3 +58,21 @@ export const SUPERFLUID_POOL_ABI = [
   }
 ] as const;
 
+export const UNISWAP_V3_POOL_ABI = [
+  {
+    inputs: [],
+    name: 'slot0',
+    outputs: [
+      { name: 'sqrtPriceX96', type: 'uint160' },
+      { name: 'tick', type: 'int24' },
+      { name: 'observationIndex', type: 'uint16' },
+      { name: 'observationCardinality', type: 'uint16' },
+      { name: 'observationCardinalityNext', type: 'uint16' },
+      { name: 'feeProtocol', type: 'uint8' },
+      { name: 'unlocked', type: 'bool' }
+    ],
+    stateMutability: 'view',
+    type: 'function'
+  }
+] as const;
+
