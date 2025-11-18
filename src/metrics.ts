@@ -15,7 +15,8 @@ import {
   VestingSchedule,
   LockerBreakdown,
   DistributionMetricsHistoryEntry,
-  DistributionMetricsHistoryResponse
+  DistributionMetricsHistoryResponse,
+  StakeCooldownProjectionEntry
 } from './types'; 
 import snapshot from '@snapshot-labs/snapshot.js';
 import snapshotStrategies from '@d10r/snapshot-strategies';
@@ -277,18 +278,9 @@ function saveHistoricalDistributionMetricsToDisk(data: MetricsData<DistributionM
   }
 }
 
-// Create voting metrics manager instance
-const votingMetricsManager = new MetricsManager<Record<string, MemberData>>(
-  {},
-  fetchVotingMetrics,
-  "votingMetrics.json",
-  VOTING_METRICS_FILE_SCHEMA_VERSION,
-  config.votingMetricsUpdateInterval
-);
-
-// Create distribution metrics manager instance
-const distributionMetricsManager = new MetricsManager<DistributionMetrics>(
-  {
+// Helper function to create default distribution metrics structure
+function createDefaultDistributionMetrics(): DistributionMetricsAggregate {
+  return {
     reserveBalances: 0,
     lockerBalances: 0,
     stakedSup: 0,
@@ -305,6 +297,31 @@ const distributionMetricsManager = new MetricsManager<DistributionMetrics>(
     supCorpOps: 0,
     other: 0,
     totalSupply: 1000000000, // 1B SUP tokens
+    reservesWithFontaines: 0,
+    reservesWithStake: 0,
+    reservesWithLiquidity: 0,
+    reservesWithInstantUnlock: 0,
+    reservesWithNone: 0,
+    instantUnlocked: 0,
+    streamUnlocked: 0,
+    tax: 0,
+    stakeCooldownProjection: [],
+  };
+}
+
+// Create voting metrics manager instance
+const votingMetricsManager = new MetricsManager<Record<string, MemberData>>(
+  {},
+  fetchVotingMetrics,
+  "votingMetrics.json",
+  VOTING_METRICS_FILE_SCHEMA_VERSION,
+  config.votingMetricsUpdateInterval
+);
+
+// Create distribution metrics manager instance
+const distributionMetricsManager = new MetricsManager<DistributionMetrics>(
+  {
+    ...createDefaultDistributionMetrics(),
     lockers: []
   },
   fetchDistributionMetrics,
@@ -355,24 +372,7 @@ async function fetchDistributionMetrics2(): Promise<DistributionMetricsAggregate
 
 // Create distribution metrics 2 manager instance
 const distributionMetrics2Manager = new MetricsManager<DistributionMetricsAggregate>(
-  {
-    reserveBalances: 0,
-    lockerBalances: 0,
-    stakedSup: 0,
-    lpSup: 0,
-    streamingOut: 0,
-    communityCharge: 0,
-    investorsTeamLocked: 0,
-    daoTreasury: 0,
-    daoTreasuryUnlocked: 0,
-    daoTreasuryLocked: 0,
-    daoSPRProgramManager: 0,
-    foundationTreasury: 0,
-    vestingTreasury: 0,
-    supCorpOps: 0,
-    other: 0,
-    totalSupply: 1000000000, // 1B SUP tokens
-  },
+  createDefaultDistributionMetrics(),
   fetchDistributionMetrics2,
   "distributionMetrics2.json",
   DISTRIBUTION_METRICS_FILE_SCHEMA_VERSION,
@@ -561,8 +561,8 @@ export const getDistributionMetricsHistory = (): DistributionMetricsHistoryRespo
 
 // Function to get investors and team addresses from vesting schedules
 async function getInvestorsAndTeamAddresses(): Promise<string[]> {
-  // Step 1: Get vesting sender contracts from transfer events
-  console.log('Fetching vesting sender contracts from transfer events...');
+  // Step 1: Get vesting sender contracts from transfer instantUnlockEvents
+  console.log('Fetching vesting sender contracts from transfer instantUnlockEvents...');
   
   const query = `
     {
@@ -582,7 +582,7 @@ async function getInvestorsAndTeamAddresses(): Promise<string[]> {
   const response = await axios.post(config.sfSubgraphUrl, { query });
   const transferEvents = response.data.data.transferEvents;
   
-  // Extract unique addresses from transfer events
+  // Extract unique addresses from transfer instantUnlockEvents
   const senderContracts = new Set<string>();
   for (const event of transferEvents) {
     senderContracts.add(event.to.id.toLowerCase());
@@ -950,7 +950,17 @@ async function calculateDistributionMetricsAtTimestamp(
     vestingTreasury,
     supCorpOps,
     other,
-    totalSupply
+    totalSupply,
+    // Historical calculations don't process individual lockers, so these are set to 0
+    reservesWithFontaines: 0,
+    reservesWithStake: 0,
+    reservesWithLiquidity: 0,
+    reservesWithInstantUnlock: 0,
+    reservesWithNone: 0,
+    instantUnlocked: 0,
+    streamUnlocked: 0,
+    tax: 0,
+    stakeCooldownProjection: []
   };
 }
 
@@ -1247,17 +1257,17 @@ export const getTotalScore = async (): Promise<TotalScoreResponse> => {
     `;
 
     const response = await axios.post(config.sfSubgraphUrl, { query });
-    const events = response.data.data.flowDistributionUpdatedEvents;
+    const instantUnlockEvents = response.data.data.flowDistributionUpdatedEvents;
     
-    console.log(`Found ${events.length} flow distribution events`);
+    console.log(`Found ${instantUnlockEvents.length} flow distribution instantUnlockEvents`);
     // log full detail
 //    console.log(JSON.stringify(response.data.data, null, 2));
     
     // Create a Map to store unique pools by ID
     const uniquePools = new Map();
     
-    // Process events and keep only the most recent event for each pool
-    for (const event of events) {
+    // Process instantUnlockEvents and keep only the most recent event for each pool
+    for (const event of instantUnlockEvents) {
       const pool = event.pool;
       const poolId = pool.id;
       
@@ -1320,13 +1330,13 @@ async function fetchVotingMetrics(): Promise<Record<string, MemberData>> {
     `;
 
     const response = await axios.post(config.sfSubgraphUrl, { query });
-    const events = response.data.data.flowDistributionUpdatedEvents;
+    const instantUnlockEvents = response.data.data.flowDistributionUpdatedEvents;
     
-    console.log(`Found ${events.length} flow distribution events`);
+    console.log(`Found ${instantUnlockEvents.length} flow distribution instantUnlockEvents`);
     
     // Create a Set to store unique pool IDs
     const uniquePools = new Set();
-    for (const event of events) {
+    for (const event of instantUnlockEvents) {
       uniquePools.add(event.pool.id);
     }
     
@@ -1535,22 +1545,7 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
     
     // Initialize metrics with default values
     const metrics: DistributionMetrics = {
-      reserveBalances: 0, // includes stakedSup and streamingOut
-      lockerBalances: 0,
-      stakedSup: 0,
-      lpSup: 0,
-      streamingOut: 0,
-      communityCharge: 0,
-      investorsTeamLocked: 0,
-      daoTreasury: 0,
-      daoTreasuryUnlocked: 0,
-      daoTreasuryLocked: 0,
-      daoSPRProgramManager: 0,
-      foundationTreasury: 0,
-      vestingTreasury: 0,
-      supCorpOps: 0,
-      other: 0,
-      totalSupply: 1000000000, // 1B SUP tokens
+      ...createDefaultDistributionMetrics(),
       lockers: []
     };
 
@@ -1706,8 +1701,18 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
     const MIN_SQRT_RATIO = 4295128739n;
 
     const batchSize = 100;
-    // Map locker address -> {owner, staked, lp, fontaines, available}
-    const lockerMap = new Map<string, {owner: string, staked: bigint, lp: bigint, fontaines: bigint, available: bigint}>();
+    // Map locker address -> {owner, staked, lp, fontaines, available, unlocksAt, instantUnlocked, streamUnlocked, tax}
+    const lockerMap = new Map<string, {
+      owner: string, 
+      staked: bigint, 
+      lp: bigint, 
+      fontaines: bigint, 
+      available: bigint, 
+      unlocksAt: bigint | null,
+      instantUnlocked: bigint,
+      streamUnlocked: bigint,
+      tax: bigint
+    }>();
 
     for (let i = 0; i < lockers.length; i += batchSize) {
       const batch = lockers.slice(i, i + batchSize);
@@ -1749,11 +1754,21 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
         }).catch(() => null)
       );
 
-      const [availableBalances, stakedBalances, liquidityBalances, owners] = await Promise.all([
+      const unlocksAtPromises = batch.map(lockerAddress =>
+        viemClient.readContract({
+          address: lockerAddress as Address,
+          abi: LOCKER_ABI,
+          functionName: 'stakingUnlocksAt',
+          args: []
+        }).catch(() => null)
+      );
+
+      const [availableBalances, stakedBalances, liquidityBalances, owners, unlocksAtTimestamps] = await Promise.all([
         Promise.all(availableBalancePromises),
         Promise.all(stakedBalancePromises),
         Promise.all(liquidityBalancePromises),
-        Promise.all(ownerPromises)
+        Promise.all(ownerPromises),
+        Promise.all(unlocksAtPromises)
       ]);
 
       // Compute SUP denominated LP amounts from liquidity balances
@@ -1770,10 +1785,62 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
           staked: stakedBalances[idx] as bigint,
           lp: lpBalances[idx] as bigint,
           fontaines: BigInt(0), // placeholder, added as next step
-          available: availableBalances[idx] as bigint
+          available: availableBalances[idx] as bigint,
+          unlocksAt: unlocksAtTimestamps[idx] ? (unlocksAtTimestamps[idx] as bigint) : null,
+          instantUnlocked: BigInt(0),
+          streamUnlocked: BigInt(0),
+          tax: BigInt(0)
         });
       });
     }
+
+    // Query transfer instantUnlockEvents to stakingRewardController for instant-unlock detection
+    console.log('Fetching transfer instantUnlockEvents to stakingRewardController...');
+    const transferEvents = await queryAllPages(
+      (lastId) => `{
+        transferEvents(
+          first: 1000,
+          where: {
+            token: "${config.baseTokenAddress.toLowerCase()}",
+            to: "${config.stakingRewardControllerAddress.toLowerCase()}",
+            id_gt: "${lastId}"
+          },
+          orderBy: id,
+          orderDirection: asc
+        ) {
+          id
+          from {
+            id
+          }
+          value
+          timestamp
+        }
+      }`,
+      (res) => res.data.data.transferEvents,
+      (item) => item,
+      config.sfSubgraphUrl
+    );
+
+    console.log(`Found ${transferEvents.length} transfer instantUnlockEvents to stakingRewardController`);
+
+    // Build a map of locker -> transfer instantUnlockEvents (only for lockers that exist)
+    const lockerAddressesSet = new Set(lockers.map(l => l.toLowerCase()));
+    const instantUnlockEventsByLocker = new Map<string, Array<{ value: bigint; timestamp: number }>>();
+    
+    transferEvents.forEach(event => {
+      const fromAddress = event.from.id.toLowerCase();
+      if (lockerAddressesSet.has(fromAddress)) {
+        if (!instantUnlockEventsByLocker.has(fromAddress)) {
+          instantUnlockEventsByLocker.set(fromAddress, []);
+        }
+        instantUnlockEventsByLocker.get(fromAddress)!.push({
+          value: BigInt(event.value),
+          timestamp: parseInt(event.timestamp, 10)
+        });
+      }
+    });
+
+    console.log(`Found ${instantUnlockEventsByLocker.size} lockers with instant-unlock instantUnlockEvents`);
 
     // Calculate streaming out by querying fontaines from sup_subgraph
     console.log('Fetching fontaines...');
@@ -1790,6 +1857,8 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
             id
           }
           recipient
+          unlockAmount
+          unlockPeriod
         }
       }`,
       (res) => res.data.data.fontaines,
@@ -1812,13 +1881,25 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
 
     const fontaineBalances = await Promise.all(fontaineBalancePromises);
     
-    // Map fontaine balances to lockers
+    // Map fontaine balances to lockers and calculate stream unlocks
     fontaines.forEach((fontaine, idx) => {
       const lockerId = fontaine.locker.id.toLowerCase();
       const balance = fontaineBalances[idx] as bigint;
+      const unlockAmount = BigInt(fontaine.unlockAmount);
+      const unlockPeriod = parseInt(fontaine.unlockPeriod, 10);
+      
+      // Log if unlockPeriod is different from the expected 12 months. Only for those the assumption of 0 tax holds
+      if (unlockPeriod !== 31536000) {
+        console.log(`Warning: Fontaine ${fontaine.id} has unlockPeriod ${unlockPeriod} (expected 31536000)`);
+      }
+      
       const locker = lockerMap.get(lockerId);
       if (locker) {
         locker.fontaines += balance;
+        if (balance > unlockAmount) {
+          throw new Error(`Fontaine ${fontaine.id} has balance ${balance} > unlockAmount ${unlockAmount}`);
+        }
+        locker.streamUnlocked += unlockAmount - balance;
       } else {
         throw new Error(`Fontaine ${fontaine.id} - owning locker ${lockerId} not found in lockerMap`);
       }
@@ -1830,19 +1911,75 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
     let totalStakedSup = BigInt(0);
     let totalLpSup = BigInt(0);
     let totalStreamingOut = BigInt(0);
+    let totalInstantUnlocked = BigInt(0);
+    let totalStreamUnlocked = BigInt(0);
+    let totalTax = BigInt(0);
     const lockerBreakdowns: LockerBreakdown[] = [];
+    
+    // Count reserves by category
+    let reservesWithFontaines = 0;
+    let reservesWithStake = 0;
+    let reservesWithLiquidity = 0;
+    let reservesWithInstantUnlock = 0;
+    let reservesWithNone = 0;
 
     lockerMap.forEach((data, address) => {
+      // Process instant unlock instantUnlockEvents for this locker
+      const instantUnlockEvents = instantUnlockEventsByLocker.get(address);
+      if (instantUnlockEvents) {
+        instantUnlockEvents.forEach(event => {
+          // 20% is unlocked, 80% goes to tax
+          const unlocked = event.value / BigInt(5); // value / 5 = 20% of value
+          data.instantUnlocked += unlocked;
+          data.tax += event.value - unlocked; // 80% of value
+        });
+      }
+
       const available = Number(data.available / BigInt(10 ** 18));
       const staked = Number(data.staked / BigInt(10 ** 18));
       const lp = Number(data.lp / BigInt(10 ** 18));
       const fontaines = Number(data.fontaines / BigInt(10 ** 18));
+      const instantUnlocked = Number(data.instantUnlocked / BigInt(10 ** 18));
+      const streamUnlocked = Number(data.streamUnlocked / BigInt(10 ** 18));
+      const tax = Number(data.tax / BigInt(10 ** 18));
 
       totalAvailableSup += data.available;
       totalStakedSup += data.staked;
       totalLpSup += data.lp;
       totalStreamingOut += data.fontaines;
-      lockerBreakdowns.push({ address, owner: data.owner, available, staked, lp, fontaines });
+      totalInstantUnlocked += data.instantUnlocked;
+      totalStreamUnlocked += data.streamUnlocked;
+      totalTax += data.tax;
+      
+      lockerBreakdowns.push({ 
+        address, 
+        owner: data.owner, 
+        available, 
+        staked, 
+        lp, 
+        fontaines,
+        instantUnlocked,
+        streamUnlocked,
+        tax
+      });
+
+      if (fontaines > 0) {
+        reservesWithFontaines++;
+      }
+      if (staked > 0) {
+        reservesWithStake++;
+      }
+      if (lp > 0) {
+        reservesWithLiquidity++;
+      }
+      if (data.instantUnlocked > 0n) {
+        reservesWithInstantUnlock++;
+      }
+
+      // Count reserves that did none of the above
+      if (fontaines === 0 && staked === 0 && lp === 0 && data.instantUnlocked === 0n) {
+        reservesWithNone++;
+      }
     });
 
     metrics.lockerBalances = Number(totalAvailableSup / BigInt(10 ** 18));
@@ -1857,6 +1994,56 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
       ( metrics.reserveBalances + metrics.lpSup + metrics.communityCharge + 
       metrics.investorsTeamLocked + metrics.daoTreasury + metrics.foundationTreasury +
       metrics.daoSPRProgramManager + metrics.vestingTreasury + metrics.supCorpOps);
+
+    // Set locker counts
+    metrics.reservesWithFontaines = reservesWithFontaines;
+    metrics.reservesWithStake = reservesWithStake;
+    metrics.reservesWithLiquidity = reservesWithLiquidity;
+    metrics.reservesWithInstantUnlock = reservesWithInstantUnlock;
+    metrics.reservesWithNone = reservesWithNone;
+    
+    // Set unlock totals
+    metrics.instantUnlocked = Number(totalInstantUnlocked / BigInt(10 ** 18));
+    metrics.streamUnlocked = Number(totalStreamUnlocked / BigInt(10 ** 18));
+    metrics.tax = Number(totalTax / BigInt(10 ** 18));
+
+    // Calculate stake cooldown projection for the next 30 days
+    const projection: StakeCooldownProjectionEntry[] = [];
+    const SECONDS_PER_DAY = 86400;
+    
+    // Initialize projection with dates for the next 30 days (starting from today in UTC)
+    const currentDate = new Date();
+    const todayUTC = new Date(Date.UTC(currentDate.getUTCFullYear(), currentDate.getUTCMonth(), currentDate.getUTCDate()));
+    
+    for (let day = 0; day < 30; day++) {
+      const date = new Date(todayUTC);
+      date.setUTCDate(date.getUTCDate() + day);
+      const dateString = date.toISOString().split('T')[0]; // YYYY-MM-DD format
+      projection.push({ date: dateString, amount: 0 });
+    }
+    
+    // Calculate which day each locker's stake becomes unstakable
+    lockerMap.forEach((data) => {
+      if (data.staked > 0n && data.unlocksAt !== null) {
+        const unlocksAt = Number(data.unlocksAt);
+        const unlockDate = new Date(unlocksAt * 1000);
+        const unlockDateUTC = new Date(Date.UTC(
+          unlockDate.getUTCFullYear(),
+          unlockDate.getUTCMonth(),
+          unlockDate.getUTCDate()
+        ));
+        
+        const daysFromNow = Math.floor((unlockDateUTC.getTime() - todayUTC.getTime()) / (1000 * SECONDS_PER_DAY));
+        
+        // Only include if unlock is within the next 30 days
+        if (daysFromNow >= 0 && daysFromNow < 30) {
+          const stakedAmount = Number(data.staked / BigInt(10 ** 18));
+          projection[daysFromNow].amount += stakedAmount;
+        }
+      }
+    });
+    
+    metrics.stakeCooldownProjection = projection;
 
     // Add per-locker breakdown
     metrics.lockers = lockerBreakdowns;
@@ -1874,7 +2061,15 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
       supCorpOps: metrics.supCorpOps,
       other: metrics.other,
       totalSupply: metrics.totalSupply,
-      lockers: metrics.lockers.length
+      lockers: metrics.lockers.length,
+      reservesWithFontaines: metrics.reservesWithFontaines,
+      reservesWithStake: metrics.reservesWithStake,
+      reservesWithLiquidity: metrics.reservesWithLiquidity,
+      reservesWithInstantUnlock: metrics.reservesWithInstantUnlock,
+      reservesWithNone: metrics.reservesWithNone,
+      instantUnlocked: metrics.instantUnlocked,
+      streamUnlocked: metrics.streamUnlocked,
+      tax: metrics.tax
     });
 
     return metrics;

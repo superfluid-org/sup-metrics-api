@@ -114,6 +114,16 @@ export interface LockerBreakdown {
   staked: number;
   lp: number;
   fontaines: number;
+  instantUnlocked: number;
+  streamUnlocked: number;
+  tax: number;
+}
+
+export interface StakeCooldownProjectionEntry {
+  /** Date in YYYY-MM-DD format (UTC) */
+  date: string;
+  /** Amount of SUP that becomes unstakable on this date */
+  amount: number;
 }
 
 /**
@@ -152,8 +162,26 @@ export interface DistributionMetrics {
   other: number;
   /** Total SUP supply (1B) */
   totalSupply: number;
+  /** Number of reserves that created at least one fontaine (streaming is not zero) */
+  reservesWithFontaines: number;
+  /** Number of reserves that created at least one stake (staked is not zero) */
+  reservesWithStake: number;
+  /** Number of reserves that created at least one LP position (liquidity is not zero) */
+  reservesWithLiquidity: number;
+  /** Number of reserves that did instant-unlock */
+  reservesWithInstantUnlock: number;
+  /** Number of reserves that did none of the above */
+  reservesWithNone: number;
+  /** Total amount unlocked via instant unlock (20% of transfer value) */
+  instantUnlocked: number;
+  /** Total amount unlocked via streaming (unlockAmount - current fontaine balance) */
+  streamUnlocked: number;
+  /** Cumulated tax paid from instant unlocks (80% of transfer value) */
+  tax: number;
   /** Per-locker breakdown */
   lockers: LockerBreakdown[];
+  /** Forward-looking projection of unstakable SUP for the next 30 days (non-cumulative, starting from current day in UTC) */
+  stakeCooldownProjection: StakeCooldownProjectionEntry[];
 }
 
 export type DistributionMetricsAggregate = Omit<DistributionMetrics, 'lockers'>;

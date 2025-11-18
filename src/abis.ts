@@ -34,6 +34,13 @@ export const LOCKER_ABI = [
     outputs: [{ type: 'uint256' }],
     stateMutability: 'view',
     type: 'function'
+  },
+  {
+    inputs: [],
+    name: 'stakingUnlocksAt',
+    outputs: [{ type: 'uint256' }],
+    stateMutability: 'view',
+    type: 'function'
   }
 ] as const;
 
