@@ -52,16 +52,38 @@ export function formatAxiosError(error: unknown, context: string): string {
       errorMsg += `[${status}] `;
     }
     if (statusText) {
-      errorMsg += `${statusText} - `;
+      errorMsg += `${statusText}`;
     }
-    if (data) {
-      // If data is an object, stringify it
-      const dataStr = typeof data === 'object' ? JSON.stringify(data) : data;
-      errorMsg += `Response: ${dataStr} `;
+    
+    // For JSON-RPC errors, extract only essential information
+    if (data && typeof data === 'object' && 'jsonrpc' in data && 'error' in data) {
+      const rpcError = (data as any).error;
+      if (rpcError) {
+        errorMsg += ` - JSON-RPC error: code=${rpcError.code || 'unknown'}, message=${rpcError.message || 'unknown'}`;
+        // Only include data field if it's short and meaningful
+        if (rpcError.data && typeof rpcError.data === 'string' && rpcError.data.length < 200) {
+          errorMsg += `, data=${rpcError.data}`;
+        }
+      }
+    } else if (data) {
+      // For non-JSON-RPC errors, include a concise representation
+      if (typeof data === 'string') {
+        // Truncate long strings
+        const truncated = data.length > 200 ? data.substring(0, 200) + '...' : data;
+        errorMsg += ` - ${truncated}`;
+      } else if (typeof data === 'object') {
+        // For objects, try to extract error message if available
+        const errorMessage = (data as any).error?.message || (data as any).message || (data as any).error;
+        if (errorMessage && typeof errorMessage === 'string') {
+          const truncated = errorMessage.length > 200 ? errorMessage.substring(0, 200) + '...' : errorMessage;
+          errorMsg += ` - ${truncated}`;
+        }
+      }
     }
-    // Add the error message if it provides additional information
+    
+    // Add the error message if it provides additional information and isn't already included
     if (message && !errorMsg.includes(message)) {
-      errorMsg += `(${message})`;
+      errorMsg += ` (${message})`;
     }
     return errorMsg;
   }

@@ -1751,7 +1751,7 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
           abi: LOCKER_ABI,
           functionName: 'lockerOwner',
           args: []
-        }).catch(() => null)
+        })
       );
 
       const unlocksAtPromises = batch.map(lockerAddress =>
@@ -1760,7 +1760,7 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
           abi: LOCKER_ABI,
           functionName: 'stakingUnlocksAt',
           args: []
-        }).catch(() => null)
+        })
       );
 
       const [availableBalances, stakedBalances, liquidityBalances, owners, unlocksAtTimestamps] = await Promise.all([
@@ -1786,7 +1786,7 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
           lp: lpBalances[idx] as bigint,
           fontaines: BigInt(0), // placeholder, added as next step
           available: availableBalances[idx] as bigint,
-          unlocksAt: unlocksAtTimestamps[idx] ? (unlocksAtTimestamps[idx] as bigint) : null,
+          unlocksAt: unlocksAtTimestamps[idx] as bigint,
           instantUnlocked: BigInt(0),
           streamUnlocked: BigInt(0),
           tax: BigInt(0)
@@ -2007,23 +2007,26 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
     metrics.streamUnlocked = Number(totalStreamUnlocked / BigInt(10 ** 18));
     metrics.tax = Number(totalTax / BigInt(10 ** 18));
 
-    // Calculate stake cooldown projection for the next 30 days
+    // Calculate stake cooldown projection for 30 days in the past to 30 days in the future
     const projection: StakeCooldownProjectionEntry[] = [];
     const SECONDS_PER_DAY = 86400;
     
-    // Initialize projection with dates for the next 30 days (starting from today in UTC)
+    // Initialize projection with dates from 30 days ago to 30 days in the future (61 days total)
     const currentDate = new Date();
     const todayUTC = new Date(Date.UTC(currentDate.getUTCFullYear(), currentDate.getUTCMonth(), currentDate.getUTCDate()));
     
-    for (let day = 0; day < 30; day++) {
+    for (let day = -30; day <= 30; day++) {
       const date = new Date(todayUTC);
       date.setUTCDate(date.getUTCDate() + day);
       const dateString = date.toISOString().split('T')[0]; // YYYY-MM-DD format
       projection.push({ date: dateString, amount: 0 });
     }
     
+    // Track amounts that are outside the projection range
+    let sumTooFarInPast = 0;
+    
     // Calculate which day each locker's stake becomes unstakable
-    lockerMap.forEach((data) => {
+    lockerMap.forEach((data, lockerAddress) => {
       if (data.staked > 0n && data.unlocksAt !== null) {
         const unlocksAt = Number(data.unlocksAt);
         const unlockDate = new Date(unlocksAt * 1000);
@@ -2034,14 +2037,28 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
         ));
         
         const daysFromNow = Math.floor((unlockDateUTC.getTime() - todayUTC.getTime()) / (1000 * SECONDS_PER_DAY));
+        const stakedAmount = Number(data.staked / BigInt(10 ** 18));
         
-        // Only include if unlock is within the next 30 days
-        if (daysFromNow >= 0 && daysFromNow < 30) {
-          const stakedAmount = Number(data.staked / BigInt(10 ** 18));
-          projection[daysFromNow].amount += stakedAmount;
+        // Include if unlock is within the projection range (-30 to +30 days)
+        if (daysFromNow >= -30 && daysFromNow <= 30) {
+          // Map daysFromNow to array index: -30 -> 0, -29 -> 1, ..., 0 -> 30, ..., 30 -> 60
+          const projectionIndex = daysFromNow + 30;
+          projection[projectionIndex].amount += stakedAmount;
+        } else if (daysFromNow < -30) {
+          // More than 30 days in the past - sum up
+          sumTooFarInPast += stakedAmount;
+        } else {
+          // More than 30 days in the future - log individual locker
+          const futureUnlockDateString = unlockDateUTC.toISOString().split('T')[0];
+          console.log(`Locker ${lockerAddress} (owner: ${data.owner}) has unlock date ${futureUnlockDateString} (${daysFromNow} days from now) with staked amount: ${stakedAmount}`);
         }
       }
     });
+    
+    // Log the sum of amounts that are too far in the past
+    if (sumTooFarInPast > 0) {
+      console.log(`Sum of staked amounts with unlock dates more than 30 days in the past: ${sumTooFarInPast}`);
+    }
     
     metrics.stakeCooldownProjection = projection;
 
