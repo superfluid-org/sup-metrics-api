@@ -343,8 +343,9 @@ async function fetchDistributionMetrics2(): Promise<DistributionMetricsAggregate
     }),
   });
 
-  const latestBaseBlock = await viemClient.getBlockNumber();
-  const latestEthereumBlock = await ethereumClient.getBlockNumber();
+  // add a small offset to reduce the risk of the subgraph not yet having synced it
+  const latestBaseBlock = await viemClient.getBlockNumber() - 100n;
+  const latestEthereumBlock = await ethereumClient.getBlockNumber() - 20n;
 
   const baseBlock = await getBlockNumberAtOrBefore(
     viemClient,
@@ -792,6 +793,7 @@ async function calculateDistributionMetricsAtTimestamp(
     taxDistributionUnits,
     supCorpTreasuryBalanceWei,
     supCorpOpsBalanceWei,
+    lpDistributionUnits,
   ] = await Promise.all([
     viemClient.readContract({
       address: config.baseTokenAddress as Address,
@@ -848,6 +850,13 @@ async function calculateDistributionMetricsAtTimestamp(
       abi: erc20Abi,
       functionName: 'balanceOf',
       args: [config.supCorpOpsAddress as Address],
+      blockNumber: baseBlock
+    }),
+    viemClient.readContract({
+      address: config.lpDistributionPoolAddress as Address,
+      abi: SUPERFLUID_POOL_ABI,
+      functionName: 'getTotalUnits',
+      args: [],
       blockNumber: baseBlock
     })
   ]);
@@ -924,7 +933,50 @@ async function calculateDistributionMetricsAtTimestamp(
   const daoTreasuryLocked = totalVestingAmount === 0n ? toTokenNumber(supCorpTreasuryBalanceWei as bigint) : toTokenNumber(totalVestingAmount);
   const daoTreasury = daoTreasuryUnlocked + daoTreasuryLocked;
 
-  const lpSup = 0; // TODO: derive LP SUP historically
+  // Query instant unlock events from SUP subgraph
+  console.log('Fetching instant unlock events...');
+  const instantUnlocks = await queryAllPages<{
+    locker: { id: string };
+    netAmount: bigint;
+  }>(
+    (lastId) => `{
+      instantUnlocks(
+        first: 1000,
+        block: { number: ${baseBlock.toString()} },
+        where: {
+          id_gt: "${lastId}"
+        },
+        orderBy: id,
+        orderDirection: asc
+      ) {
+        id
+        locker {
+          id
+        }
+        netAmount
+      }
+    }`,
+    (res) => res.data.data.instantUnlocks,
+    (item) => ({
+      locker: { id: item.locker.id },
+      netAmount: BigInt(item.netAmount)
+    }),
+    config.supSubgraphUrl
+  );
+
+  // Sum up netAmount values (the 20% that recipients actually received)
+  const totalInstantUnlockedWei = instantUnlocks.reduce((sum, unlock) => sum + unlock.netAmount, 0n);
+  const instantUnlocked = toTokenNumber(totalInstantUnlockedWei);
+
+  // Count distinct lockers that performed instant unlocks
+  const distinctLockers = new Set(instantUnlocks.map(unlock => unlock.locker.id.toLowerCase()));
+  const reservesWithInstantUnlock = distinctLockers.size;
+
+  console.log(`  Found ${instantUnlocks.length} instant unlock events from ${reservesWithInstantUnlock} distinct lockers, total netAmount: ${instantUnlocked}`);
+
+  // Calculate lpSup: multiply units by 100 to offset the scaler of 1e16, then convert to full tokens
+  // units * 100 / 1e18 = units / 1e16 (since 100 / 1e18 = 1 / 1e16)
+  const lpSup = Number((lpDistributionUnits as bigint) * 100n);
   const streamingOut = 0; // TODO: derive streaming out historically
   const lockerBalances = reserveBalances - (stakedSup + lpSup + streamingOut);
 
@@ -955,9 +1007,9 @@ async function calculateDistributionMetricsAtTimestamp(
     reservesWithFontaines: 0,
     reservesWithStake: 0,
     reservesWithLiquidity: 0,
-    reservesWithInstantUnlock: 0,
+    reservesWithInstantUnlock,
     reservesWithNone: 0,
-    instantUnlocked: 0,
+    instantUnlocked,
     streamUnlocked: 0,
     tax: 0,
     stakeCooldownProjection: []

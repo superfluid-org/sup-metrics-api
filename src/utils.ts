@@ -110,8 +110,14 @@ export async function queryAllPages<T>(
     });
 
     if (response.data.errors) {
-      console.error('GraphQL errors:', response.data.errors);
-      break;
+      const errorMessage = `GraphQL errors occurred while querying ${graphqlEndpoint}: ${JSON.stringify(response.data.errors)}`;
+      console.error(errorMessage);
+      // Throw an error so callers can distinguish between errors and empty results
+      // Include partial data collected so far in case caller wants to use it
+      const error: any = new Error(errorMessage);
+      error.graphqlErrors = response.data.errors;
+      error.partialData = items;
+      throw error;
     }
 
     const newItems = toItems(response);
