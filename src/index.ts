@@ -13,6 +13,15 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
+// Middleware to round numbers to 2 decimals and prevent scientific notation
+app.use((req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = (data: any) => originalJson(JSON.parse(JSON.stringify(data, (_, v) => 
+    typeof v === 'number' ? Math.round(v) : v
+  )));
+  next();
+});
+
 // Register TSOA routes
 RegisterRoutes(app);
 
