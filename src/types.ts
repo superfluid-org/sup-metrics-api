@@ -136,8 +136,12 @@ export interface DistributionMetrics {
   lockerBalances: number;
   /** Portion currently staked via lockers */
   stakedSup: number;
-  /** Portion in UniswapV3 liquidity via lockers */
+  /** Portion in UniswapV3 liquidity via lockers (calculated from current liquidity and pool price) */
   lpSup: number;
+  /** Total SUP provided to LP positions */
+  lpSupProvided: number;
+  /** Total SUP collected from LP positions */
+  lpSupCollected: number;
   /** Portion transferred from lockers to fountains, not yet streamed to users */
   streamingOut: number;
   /** SUP owned by StakingRewardController (tax from fast unlocks) */

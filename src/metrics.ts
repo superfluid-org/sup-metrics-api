@@ -285,6 +285,8 @@ function createDefaultDistributionMetrics(): DistributionMetricsAggregate {
     lockerBalances: 0,
     stakedSup: 0,
     lpSup: 0,
+    lpSupProvided: 0,
+    lpSupCollected: 0,
     streamingOut: 0,
     communityCharge: 0,
     investorsTeamLocked: 0,
@@ -755,6 +757,71 @@ function sumStreamAmounts(streams: ProgramManagerStreamState[], refTimestamp: nu
   }, 0n);
 }
 
+// Helper function to calculate lpSupProvided and lpSupCollected from liquidity positions
+async function calculateLpSupProvidedAndCollected(blockNumber?: bigint): Promise<{ 
+  lpSupProvided: number; 
+  lpSupCollected: number;
+  liquidityPositions: Array<{ liquidityAmount: string }>;
+}> {
+  const blockClause = blockNumber !== undefined ? `block: { number: ${blockNumber.toString()} },` : '';
+  
+  console.log('Fetching liquidity positions...');
+  const liquidityPositions = await queryAllPages<{
+    id: string;
+    locker: { id: string };
+    liquidityAmount: string;
+    token1AmountProvided: string;
+    token1AmountCollected: string | null;
+  }>(
+    (lastId) => `{
+      liquidityPositions(
+        first: 1000,
+        ${blockClause}
+        where: {
+          id_gt: "${lastId}"
+        },
+        orderBy: id,
+        orderDirection: asc
+      ) {
+        id
+        locker {
+          id
+        }
+        liquidityAmount
+        token1AmountProvided
+        token1AmountCollected
+      }
+    }`,
+    (res) => res.data.data.liquidityPositions,
+    (item) => ({
+      id: item.id,
+      locker: { id: item.locker.id },
+      liquidityAmount: item.liquidityAmount,
+      token1AmountProvided: item.token1AmountProvided,
+      token1AmountCollected: item.token1AmountCollected,
+    }),
+    config.supSubgraphUrl
+  );
+
+  const totalToken1AmountProvidedWei = liquidityPositions.reduce((sum, position) => {
+    return sum + BigInt(position.token1AmountProvided);
+  }, 0n);
+  const lpSupProvided = toTokenNumber(totalToken1AmountProvidedWei);
+
+  const totalToken1AmountCollectedWei = liquidityPositions.reduce((sum, position) => {
+    return sum + BigInt(position.token1AmountCollected || '0');
+  }, 0n);
+  const lpSupCollected = toTokenNumber(totalToken1AmountCollectedWei);
+
+  console.log(`  Found ${liquidityPositions.length} liquidity positions, lpSupProvided: ${lpSupProvided}, lpSupCollected: ${lpSupCollected}`);
+  
+  return { 
+    lpSupProvided, 
+    lpSupCollected,
+    liquidityPositions: liquidityPositions.map(p => ({ liquidityAmount: p.liquidityAmount }))
+  };
+}
+
 async function calculateDistributionMetricsAtTimestamp(
   timestamp: number,
   baseBlock: bigint,
@@ -793,7 +860,6 @@ async function calculateDistributionMetricsAtTimestamp(
     taxDistributionUnits,
     supCorpTreasuryBalanceWei,
     supCorpOpsBalanceWei,
-    lpDistributionUnits,
   ] = await Promise.all([
     viemClient.readContract({
       address: config.baseTokenAddress as Address,
@@ -850,13 +916,6 @@ async function calculateDistributionMetricsAtTimestamp(
       abi: erc20Abi,
       functionName: 'balanceOf',
       args: [config.supCorpOpsAddress as Address],
-      blockNumber: baseBlock
-    }),
-    viemClient.readContract({
-      address: config.lpDistributionPoolAddress as Address,
-      abi: SUPERFLUID_POOL_ABI,
-      functionName: 'getTotalUnits',
-      args: [],
       blockNumber: baseBlock
     })
   ]);
@@ -967,6 +1026,7 @@ async function calculateDistributionMetricsAtTimestamp(
   // Sum up netAmount values (the 20% that recipients actually received)
   const totalInstantUnlockedWei = instantUnlocks.reduce((sum, unlock) => sum + unlock.netAmount, 0n);
   const instantUnlocked = toTokenNumber(totalInstantUnlockedWei);
+  const tax = toTokenNumber(totalInstantUnlockedWei * BigInt(4));
 
   // Count distinct lockers that performed instant unlocks
   const distinctLockers = new Set(instantUnlocks.map(unlock => unlock.locker.id.toLowerCase()));
@@ -974,11 +1034,130 @@ async function calculateDistributionMetricsAtTimestamp(
 
   console.log(`  Found ${instantUnlocks.length} instant unlock events from ${reservesWithInstantUnlock} distinct lockers, total netAmount: ${instantUnlocked}`);
 
-  // Calculate lpSup: multiply units by 100 to offset the scaler of 1e16, then convert to full tokens
-  // units * 100 / 1e18 = units / 1e16 (since 100 / 1e18 = 1 / 1e16)
-  const lpSup = Number((lpDistributionUnits as bigint) * 100n);
-  const streamingOut = 0; // TODO: derive streaming out historically
-  const lockerBalances = reserveBalances - (stakedSup + lpSup + streamingOut);
+  // Calculate lpSupProvided and lpSupCollected
+  const { lpSupProvided, lpSupCollected, liquidityPositions } = await calculateLpSupProvidedAndCollected(baseBlock);
+
+  console.log('Fetching Uniswap V3 pool price...');
+  const poolSlot0 = await viemClient.readContract({
+    address: config.uniswapV3PoolAddress as Address,
+    abi: UNISWAP_V3_POOL_ABI,
+    functionName: 'slot0',
+    blockNumber: baseBlock
+  });
+  const sqrtPriceX96 = poolSlot0[0] as bigint;
+  console.log(`Pool sqrtPriceX96 at block ${baseBlock.toString()}: ${sqrtPriceX96.toString()}`);
+
+  const Q96 = 1n << 96n;
+  const MIN_SQRT_RATIO = 4295128739n;
+
+  // Sum up all liquidity amounts
+  const totalLiquidityWei = liquidityPositions.reduce((sum, position) => {
+    return sum + BigInt(position.liquidityAmount);
+  }, 0n);
+
+  // Calculate SUP amount: amount1 = L * (sqrtPriceX96 - MIN_SQRT_RATIO) / Q96
+  const lpSupWei = (totalLiquidityWei * (sqrtPriceX96 - MIN_SQRT_RATIO)) / Q96;
+  const lpSup = toTokenNumber(lpSupWei);
+
+  console.log(`  Calculated lpSup: ${lpSup}`);
+
+  // Query fontaines and calculate streaming out
+  console.log('Fetching fontaines...');
+  const fontaines = await queryAllPages<{
+    id: string;
+    locker: { id: string };
+    recipient: string;
+    unlockAmount: string;
+    unlockPeriod: string;
+    blockTimestamp: string;
+    endDate: string;
+    unlockFlowRate: string;
+  }>(
+    (lastId) => `{
+      fontaines(
+        first: 1000,
+        block: { number: ${baseBlock.toString()} },
+        where: {
+          id_gt: "${lastId}"
+        },
+        orderBy: id,
+        orderDirection: asc
+      ) {
+        id
+        locker {
+          id
+        }
+        recipient
+        unlockAmount
+        unlockPeriod
+        blockTimestamp
+        endDate
+        unlockFlowRate
+      }
+    }`,
+    (res) => res.data.data.fontaines,
+    (item) => ({
+      id: item.id,
+      locker: { id: item.locker.id },
+      recipient: item.recipient,
+      unlockAmount: item.unlockAmount,
+      unlockPeriod: item.unlockPeriod,
+      blockTimestamp: item.blockTimestamp,
+      endDate: item.endDate,
+      unlockFlowRate: item.unlockFlowRate
+    }),
+    config.supSubgraphUrl
+  );
+
+  console.log(`Found ${fontaines.length} fontaines`);
+
+  let totalStreamingOut = 0n;
+  let totalStreamUnlocked = 0n;
+
+  for (const fontaine of fontaines) {
+    const fontaineBlockTimestamp = parseInt(fontaine.blockTimestamp, 10);
+    const endDate = parseInt(fontaine.endDate, 10);
+    const unlockAmount = BigInt(fontaine.unlockAmount);
+    const unlockFlowRate = BigInt(fontaine.unlockFlowRate);
+
+    // Verification check: unlockFlowRate * (endDate - blockTimestamp) == unlockAmount
+    const expectedUnlockAmount = unlockFlowRate * BigInt(endDate - fontaineBlockTimestamp);
+    // unlockAmount can be slightly larger due to rounding, but not more than 1 second of unlockFlowRate
+    if (unlockAmount < expectedUnlockAmount || unlockAmount - expectedUnlockAmount > unlockFlowRate) {
+      throw new Error(
+        `Fontaine ${fontaine.id} verification failed: ` +
+        `unlockFlowRate * (endDate - blockTimestamp) = ${expectedUnlockAmount.toString()} != unlockAmount = ${unlockAmount.toString()}, unlockFlowRate = ${unlockFlowRate.toString()}`
+      );
+    }
+
+    // Throw error if snapshot timestamp is before fontaine started
+    if (timestamp < fontaineBlockTimestamp) {
+      throw new Error(
+        `Snapshot timestamp ${timestamp} is before fontaine ${fontaine.id} blockTimestamp ${fontaineBlockTimestamp}`
+      );
+    }
+
+    // Calculate how much has been streamed
+    let streamed: bigint;
+    if (timestamp >= endDate) {
+      // Fully streamed
+      streamed = unlockAmount;
+    } else {
+      // Partially streamed
+      const timeElapsed = BigInt(timestamp - fontaineBlockTimestamp);
+      streamed = unlockFlowRate * timeElapsed;
+    }
+
+    const remaining = unlockAmount - streamed;
+    totalStreamingOut += remaining;
+    totalStreamUnlocked += streamed;
+  }
+
+  const streamingOut = toTokenNumber(totalStreamingOut);
+  const streamUnlocked = toTokenNumber(totalStreamUnlocked);
+  console.log(`  Calculated streamingOut: ${streamingOut}, streamUnlocked: ${streamUnlocked}`);
+
+  const lockerBalances = reserveBalances - (stakedSup + lpSup + streamingOut + instantUnlocked + streamUnlocked + tax);
 
   const totalSupply = 1000000000;
   const otherRaw = totalSupply -
@@ -991,6 +1170,8 @@ async function calculateDistributionMetricsAtTimestamp(
     lockerBalances,
     stakedSup,
     lpSup,
+    lpSupProvided,
+    lpSupCollected,
     streamingOut,
     communityCharge,
     investorsTeamLocked,
@@ -1010,8 +1191,8 @@ async function calculateDistributionMetricsAtTimestamp(
     reservesWithInstantUnlock,
     reservesWithNone: 0,
     instantUnlocked,
-    streamUnlocked: 0,
-    tax: 0,
+    streamUnlocked,
+    tax,
     stakeCooldownProjection: []
   };
 }
@@ -1981,9 +2162,9 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
       if (instantUnlockEvents) {
         instantUnlockEvents.forEach(event => {
           // 20% is unlocked, 80% goes to tax
-          const unlocked = event.value / BigInt(5); // value / 5 = 20% of value
+          const unlocked = event.value / BigInt(4); // 1/4 of 80% is 20%
           data.instantUnlocked += unlocked;
-          data.tax += event.value - unlocked; // 80% of value
+          data.tax += event.value; // 80% of value
         });
       }
 
@@ -2038,6 +2219,11 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
     metrics.stakedSup = Number(totalStakedSup / BigInt(10 ** 18));
     metrics.streamingOut = Number(totalStreamingOut / BigInt(10 ** 18));
     metrics.lpSup = Number(totalLpSup / BigInt(10 ** 18));
+
+    // Calculate lpSupProvided and lpSupCollected
+    const { lpSupProvided, lpSupCollected } = await calculateLpSupProvidedAndCollected();
+    metrics.lpSupProvided = lpSupProvided;
+    metrics.lpSupCollected = lpSupCollected;
 
     metrics.reserveBalances = metrics.lockerBalances + metrics.stakedSup + metrics.lpSup + metrics.streamingOut;
 
