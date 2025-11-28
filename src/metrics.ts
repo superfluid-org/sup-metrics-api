@@ -38,8 +38,8 @@ import {
 // File paths for metric data
 const DATA_DIR = './data';
 const VOTING_METRICS_FILE_SCHEMA_VERSION = 2;
-const DISTRIBUTION_METRICS_FILE_SCHEMA_VERSION = 6;
-const DISTRIBUTION_METRICS_HISTORY_FILE_SCHEMA_VERSION = 1;
+const DISTRIBUTION_METRICS_FILE_SCHEMA_VERSION = 7;
+const DISTRIBUTION_METRICS_HISTORY_FILE_SCHEMA_VERSION = 2;
 const HISTORY_FILE_NAME = 'distributionMetricsHistory.json';
 const HISTORY_FILE_PATH = path.join(DATA_DIR, HISTORY_FILE_NAME);
 const baseBlockNumberCache = new Map<number, bigint>();
