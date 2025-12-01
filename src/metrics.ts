@@ -16,7 +16,8 @@ import {
   LockerBreakdown,
   DistributionMetricsHistoryEntry,
   DistributionMetricsHistoryResponse,
-  StakeCooldownProjectionEntry
+  StakeCooldownProjectionEntry,
+  CirculatingSupplyResponse
 } from './types'; 
 import snapshot from '@snapshot-labs/snapshot.js';
 import snapshotStrategies from '@d10r/snapshot-strategies';
@@ -559,6 +560,22 @@ export const getDistributionMetricsHistory = (): DistributionMetricsHistoryRespo
   return {
     metrics: historicalDistributionMetrics.data,
     lastUpdatedAt: historicalDistributionMetrics.lastUpdatedAt
+  };
+};
+
+export const getCirculatingSupply = (): CirculatingSupplyResponse => {
+  const { metrics } = getDistributionMetrics();
+  
+  // Calculate circulating supply
+  const circulating = 1000000000 - (
+    metrics.investorsTeamLocked + metrics.vestingTreasury +
+    metrics.foundationTreasury +
+    metrics.daoTreasury + metrics.daoSPRProgramManager + metrics.communityCharge +
+    metrics.stakedSup + metrics.streamingOut + metrics.lockerBalances
+  );
+  
+  return {
+    result: circulating.toString()
   };
 };
 

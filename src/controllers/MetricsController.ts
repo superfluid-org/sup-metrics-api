@@ -9,7 +9,8 @@ import {
   getDaoMembersWithFilters,
   getDistributionMetrics,
   getDistributionMetrics2,
-  getDistributionMetricsHistory
+  getDistributionMetricsHistory,
+  getCirculatingSupply
 } from '../metrics';
 import {
   DaoMembersCountResponse,
@@ -20,7 +21,8 @@ import {
   TotalScoreResponse,
   DaoMembersResponse,
   DistributionMetricsResponse,
-  DistributionMetricsHistoryResponse
+  DistributionMetricsHistoryResponse,
+  CirculatingSupplyResponse
 } from '../types';
 import { config } from '../config';
 
@@ -182,6 +184,19 @@ export class MetricsController extends Controller {
   @Get('/distribution_metrics_history')
   public getDistributionMetricsHistory(): DistributionMetricsHistoryResponse {
     return getDistributionMetricsHistory();
+  }
+
+  /**
+   * Get circulating supply of SUP tokens.<br><br>
+   * 
+   * Returns the circulating supply calculated as:<br>
+   * 1B - InsiderUnvestedAmount - FoundationControlledAmount - DAOTreasuryAmount - ReserveStaked - ReserveToBeStreamedFromFontaine - ReserveUndecided<br><br>
+   * 
+   * This metrics is calculated from the latest distribution metrics.
+   */
+  @Get('/circulating')
+  public getCirculating(): CirculatingSupplyResponse {
+    return getCirculatingSupply();
   }
 
   /**

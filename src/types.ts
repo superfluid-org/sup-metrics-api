@@ -212,6 +212,14 @@ export interface DistributionMetricsHistoryResponse {
   lastUpdatedAt: number;
 }
 
+/**
+ * Response for circulating supply endpoint
+ */
+export interface CirculatingSupplyResponse {
+  /** Circulating supply of SUP tokens */
+  result: string;
+}
+
 export type VestingSchedule = {
   sender: string;
   receiver: string;
