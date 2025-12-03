@@ -52,7 +52,7 @@ export const config = {
   votingMetricsUpdateInterval: parseInt(process.env.VOTING_METRICS_UPDATE_INTERVAL || '86400', 10),
   distributionMetricsUpdateInterval: parseInt(process.env.DISTRIBUTION_METRICS_UPDATE_INTERVAL || '86400', 10),
   distributionMetrics2UpdateInterval: parseInt(process.env.DISTRIBUTION_METRICS_2_UPDATE_INTERVAL || '86400', 10),
-  distributionMetricsHistorySnapshotSpacing: parseInt(process.env.DISTRIBUTION_METRICS_HISTORY_SNAPSHOT_SPACING || '86400 * 7', 10),
+  distributionMetricsHistorySnapshotSpacing: parseInt(process.env.DISTRIBUTION_METRICS_HISTORY_SNAPSHOT_SPACING || '604800', 10), // 1 week
   vpCalcChunkSize: parseInt(process.env.VP_CALC_CHUNK_SIZE || '5000', 10),
 }; 
 
