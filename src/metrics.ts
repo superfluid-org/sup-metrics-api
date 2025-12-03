@@ -385,7 +385,7 @@ const distributionMetrics2Manager = new MetricsManager<DistributionMetricsAggreg
 
 loadHistoricalDistributionMetricsFromDisk();
 if (process.env.REFRESH_HISTORICAL_STATE && process.env.REFRESH_HISTORICAL_STATE.toLowerCase() === 'true') {
-  void refreshHistoricalDistributionMetricsIfNeeded();
+  void refreshHistoricalDistributionMetrics();
 }
 
 // Cache for space config with 24h expiration
@@ -1055,29 +1055,40 @@ async function calculateDistributionMetricsAtTimestamp(
   // Calculate lpSupProvided and lpSupCollected
   const { lpSupProvided, lpSupCollected, liquidityPositions } = await calculateLpSupProvidedAndCollected(baseBlock);
 
-  console.log('Fetching Uniswap V3 pool price...');
-  const poolSlot0 = await viemClient.readContract({
+  // Fetch Uniswap V3 pool price if the pool exists at this block
+  let lpSup = 0;
+  const poolCode = await viemClient.getCode({
     address: config.uniswapV3PoolAddress as Address,
-    abi: UNISWAP_V3_POOL_ABI,
-    functionName: 'slot0',
     blockNumber: baseBlock
   });
-  const sqrtPriceX96 = poolSlot0[0] as bigint;
-  console.log(`Pool sqrtPriceX96 at block ${baseBlock.toString()}: ${sqrtPriceX96.toString()}`);
+  
+  if (poolCode && poolCode !== '0x') {
+    console.log('Fetching Uniswap V3 pool price...');
+    const poolSlot0 = await viemClient.readContract({
+      address: config.uniswapV3PoolAddress as Address,
+      abi: UNISWAP_V3_POOL_ABI,
+      functionName: 'slot0',
+      blockNumber: baseBlock
+    });
+    const sqrtPriceX96 = poolSlot0[0] as bigint;
+    console.log(`Pool sqrtPriceX96 at block ${baseBlock.toString()}: ${sqrtPriceX96.toString()}`);
 
-  const Q96 = 1n << 96n;
-  const MIN_SQRT_RATIO = 4295128739n;
+    const Q96 = 1n << 96n;
+    const MIN_SQRT_RATIO = 4295128739n;
 
-  // Sum up all liquidity amounts
-  const totalLiquidityWei = liquidityPositions.reduce((sum, position) => {
-    return sum + BigInt(position.liquidityAmount);
-  }, 0n);
+    // Sum up all liquidity amounts
+    const totalLiquidityWei = liquidityPositions.reduce((sum, position) => {
+      return sum + BigInt(position.liquidityAmount);
+    }, 0n);
 
-  // Calculate SUP amount: amount1 = L * (sqrtPriceX96 - MIN_SQRT_RATIO) / Q96
-  const lpSupWei = (totalLiquidityWei * (sqrtPriceX96 - MIN_SQRT_RATIO)) / Q96;
-  const lpSup = toTokenNumber(lpSupWei);
+    // Calculate SUP amount: amount1 = L * (sqrtPriceX96 - MIN_SQRT_RATIO) / Q96
+    const lpSupWei = (totalLiquidityWei * (sqrtPriceX96 - MIN_SQRT_RATIO)) / Q96;
+    lpSup = toTokenNumber(lpSupWei);
 
-  console.log(`  Calculated lpSup: ${lpSup}`);
+    console.log(`  Calculated lpSup: ${lpSup}`);
+  } else {
+    console.log(`  Uniswap V3 pool does not exist at block ${baseBlock.toString()}, setting lpSup to 0`);
+  }
 
   // Query fontaines and calculate streaming out
   console.log('Fetching fontaines...');
@@ -1218,10 +1229,10 @@ async function calculateDistributionMetricsAtTimestamp(
 async function fetchHistoricalDistributionMetrics(
   startTimestamp: number,
   endTimestamp: number,
-  stepSeconds: number = 86400 * 7
+  stepSeconds: number = config.distributionMetricsHistorySnapshotSpacing
 ): Promise<DistributionMetricsHistoryEntry[]> {
   if (endTimestamp < startTimestamp) {
-    return [];
+    throw new Error('End timestamp is before start timestamp');
   }
 
   console.log(`Starting historical distribution metrics fetch from ${new Date(startTimestamp * 1000).toISOString()} to ${new Date(endTimestamp * 1000).toISOString()}`);
@@ -1244,67 +1255,53 @@ async function fetchHistoricalDistributionMetrics(
   let previousEthereumBlock = 0n;
 
   for (let timestamp = startTimestamp; timestamp <= endTimestamp; timestamp += stepSeconds) {
-    try {
-      console.log(`Calculating historical distribution metrics for ${new Date(timestamp * 1000).toISOString().slice(0, 10)}`);
+    console.log(`Calculating historical distribution metrics for ${new Date(timestamp * 1000).toISOString().slice(0, 10)}`);
 
-      const baseBlock = await getBlockNumberAtOrBefore(
-        viemClient,
-        timestamp,
-        baseBlockNumberCache,
-        previousBaseBlock,
-        latestBaseBlock,
-        BASE_BLOCK_TIME_SECONDS
-      );
-      const ethereumBlock = await getBlockNumberAtOrBefore(
-        ethereumClient,
-        timestamp,
-        ethereumBlockNumberCache,
-        previousEthereumBlock,
-        latestEthereumBlock,
-        ETHEREUM_BLOCK_TIME_SECONDS
-      );
+    const baseBlock = await getBlockNumberAtOrBefore(
+      viemClient,
+      timestamp,
+      baseBlockNumberCache,
+      previousBaseBlock,
+      latestBaseBlock,
+      BASE_BLOCK_TIME_SECONDS
+    );
+    const ethereumBlock = await getBlockNumberAtOrBefore(
+      ethereumClient,
+      timestamp,
+      ethereumBlockNumberCache,
+      previousEthereumBlock,
+      latestEthereumBlock,
+      ETHEREUM_BLOCK_TIME_SECONDS
+    );
 
-      previousBaseBlock = baseBlock;
-      previousEthereumBlock = ethereumBlock;
+    previousBaseBlock = baseBlock;
+    previousEthereumBlock = ethereumBlock;
 
-      const snapshot = await calculateDistributionMetricsAtTimestamp(timestamp, baseBlock, ethereumBlock);
-      snapshots.push(snapshot);
-      console.log(`[HistoricalMetrics] Snapshot for ${new Date(timestamp * 1000).toISOString().slice(0, 10)}: ${safeStringify(snapshot, 2)}`);
-    } catch (error) {
-      // Silently swallow errors and continue to next timestamp
-      console.warn(`Skipping timestamp ${timestamp} due to error: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    const snapshot = await calculateDistributionMetricsAtTimestamp(timestamp, baseBlock, ethereumBlock);
+    snapshots.push(snapshot);
+    console.log(`[HistoricalMetrics] Snapshot for ${new Date(timestamp * 1000).toISOString().slice(0, 10)}: ${safeStringify(snapshot, 2)}`);
   }
 
   return snapshots;
 }
 
-async function refreshHistoricalDistributionMetricsIfNeeded(): Promise<void> {
-  const refreshFlag = process.env.REFRESH_HISTORICAL_STATE;
-  if (!refreshFlag || refreshFlag.toLowerCase() !== 'true') {
-    return;
-  }
+async function refreshHistoricalDistributionMetrics(): Promise<void> {
+  // TODO: make configurable
+  const startTimestamp = Math.floor(Date.UTC(2025, 1, 19, 0, 0, 0) / 1000);
+  const now = new Date();
+  const endTimestamp = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0) / 1000);
 
-  try {
-    // TODO: make configurable
-    const startTimestamp = Math.floor(Date.UTC(2025, 1, 19, 0, 0, 0) / 1000);
-    const now = new Date();
-    const endTimestamp = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0) / 1000);
+  const historicalSnapshots = await fetchHistoricalDistributionMetrics(startTimestamp, endTimestamp);
+  const lastUpdatedAt = Math.floor(Date.now() / 1000);
 
-    const historicalSnapshots = await fetchHistoricalDistributionMetrics(startTimestamp, endTimestamp);
-    const lastUpdatedAt = Math.floor(Date.now() / 1000);
+  const payload: MetricsData<DistributionMetricsHistoryEntry[]> = {
+    schemaVersion: DISTRIBUTION_METRICS_HISTORY_FILE_SCHEMA_VERSION,
+    lastUpdatedAt,
+    data: historicalSnapshots
+  };
 
-    const payload: MetricsData<DistributionMetricsHistoryEntry[]> = {
-      schemaVersion: DISTRIBUTION_METRICS_HISTORY_FILE_SCHEMA_VERSION,
-      lastUpdatedAt,
-      data: historicalSnapshots
-    };
-
-    historicalDistributionMetrics = payload;
-    saveHistoricalDistributionMetricsToDisk(payload);
-  } catch (error) {
-    console.error('Failed to refresh historical distribution metrics:', error);
-  }
+  historicalDistributionMetrics = payload;
+  saveHistoricalDistributionMetricsToDisk(payload);
 }
 
 export const getVotingPowerBatch = async (addresses: string[], includeDelegations: boolean): Promise<VotingPower[]> => {
@@ -1937,20 +1934,6 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
 
     console.log(`Found ${lockers.length} lockers`);
 
-    // Get sqrtPriceX96 once from the Uniswap V3 pool
-    console.log('Fetching Uniswap V3 pool price...');
-    const poolSlot0 = await viemClient.readContract({
-      address: config.uniswapV3PoolAddress as Address,
-      abi: UNISWAP_V3_POOL_ABI,
-      functionName: 'slot0',
-    });
-    const sqrtPriceX96 = poolSlot0[0] as bigint;
-    console.log(`Pool sqrtPriceX96: ${sqrtPriceX96.toString()}`);
-
-    // Constants for LP calculation
-    const Q96 = 1n << 96n;
-    const MIN_SQRT_RATIO = 4295128739n;
-
     const batchSize = 100;
     // Map locker address -> {owner, staked, lp, fontaines, available, unlocksAt, instantUnlocked, streamUnlocked, tax}
     const lockerMap = new Map<string, {
@@ -2022,12 +2005,33 @@ async function fetchDistributionMetrics(): Promise<DistributionMetrics> {
         Promise.all(unlocksAtPromises)
       ]);
 
-      // Compute SUP denominated LP amounts from liquidity balances
-      const lpBalances = liquidityBalances.map(liquidityBalance => {
-        const liquidity = liquidityBalance as bigint;
-        // Exact: amount1 = L * (sqrtPriceX96 - MIN_SQRT_RATIO) / Q96
-        return (liquidity * (sqrtPriceX96 - MIN_SQRT_RATIO)) / Q96;
+      // calculate lp balance from price if pool exists
+      const poolCode = await viemClient.getCode({
+        address: config.uniswapV3PoolAddress as Address
       });
+      
+      let lpBalances: bigint[];
+      if (poolCode && poolCode !== '0x') {
+        const Q96 = 1n << 96n;
+        const MIN_SQRT_RATIO = 4295128739n;
+
+        console.log('Fetching Uniswap V3 pool price...');
+        const poolSlot0 = await viemClient.readContract({
+          address: config.uniswapV3PoolAddress as Address,
+          abi: UNISWAP_V3_POOL_ABI,
+          functionName: 'slot0',
+        });
+        const sqrtPriceX96 = poolSlot0[0] as bigint;
+        console.log(`Pool sqrtPriceX96: ${sqrtPriceX96.toString()}`);
+        
+        // Exact: amount1 = L * (sqrtPriceX96 - MIN_SQRT_RATIO) / Q96
+        lpBalances = liquidityBalances.map(liquidityBalance => 
+          ((liquidityBalance as bigint) * (sqrtPriceX96 - MIN_SQRT_RATIO)) / Q96
+        );
+      } else {
+        console.log('  Uniswap V3 pool does not exist');
+        lpBalances = liquidityBalances.map(() => 0n);
+      }
 
       // Track per-locker data and log detailed info for non-zero liquidity balances
       batch.forEach((lockerAddress, idx) => {
