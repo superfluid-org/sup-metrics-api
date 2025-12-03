@@ -575,7 +575,8 @@ export const getCirculatingSupply = (): CirculatingSupplyResponse => {
   );
   
   return {
-    result: circulating.toString()
+    result: circulating.toString(),
+    comment: 'Circulating supply of SUP tokens, calculated as 1B - (InsiderUnvestedAmount + FoundationControlledAmount + DAOTreasuryAmount + ReserveStaked + ReserveToBeStreamedFromFontaine + ReserveUndecided)'
   };
 };
 

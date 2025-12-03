@@ -218,6 +218,7 @@ export interface DistributionMetricsHistoryResponse {
 export interface CirculatingSupplyResponse {
   /** Circulating supply of SUP tokens */
   result: string;
+  comment: string;
 }
 
 export type VestingSchedule = {
