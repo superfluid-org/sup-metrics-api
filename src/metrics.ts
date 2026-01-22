@@ -1375,50 +1375,16 @@ export const getVotingPowerBatch = async (addresses: string[], includeDelegation
 }
 
 export const getVotingPower = async (address: string): Promise<VotingPower> => {
-  const spaceConfig = await getSpaceConfig();
-
-  try {
-    const scoreApiPayload = {
-      jsonrpc: "2.0",
-      method: "get_vp",
-      params: {
-        address: address.toLowerCase(),
-        space: config.snapshotSpace,
-        strategies: spaceConfig.strategies,
-        network: spaceConfig.network,
-        snapshot: "latest"
-      }
-    };
-
-    const response = await axios.post(config.snapshotScoreUrl, scoreApiPayload);
-    if (response.data?.result?.vp) {
-      const totalVp = response.data.result.vp;
-      // TODO: add check that item 0 is indeed the own voting power
-      const ownVp = response.data.result.vp_by_strategy[0] + response.data.result.vp_by_strategy[2];
-      const delegatedVp = response.data.result.vp_by_strategy[1];
-      if (totalVp - ownVp !== delegatedVp) {
-        console.error(`Voting power for ${address}: ${totalVp} (delegated: ${delegatedVp}, own: ${ownVp})`);
-        throw new Error(`Voting power for ${address} is not consistent`);
-      }
-      console.log(`Voting power for ${address}: ${totalVp} (delegated: ${delegatedVp}, own: ${ownVp})`);
-      //console.log(`Voting power raw for ${address}: ${JSON.stringify(response.data.result, null, 2)}`);
-      console.log(`  get_vp ${address} returned: ${JSON.stringify(response.data.result, null, 2)}`);
-      return {
-        address: address.toLowerCase(),
-        own: ownVp,
-        delegated: delegatedVp
-      };
-    }
-
+  // Use the local batch implementation for consistency
+  const results = await getVotingPowerBatch([address], true);
+  if (results.length === 0) {
     return {
       address: address.toLowerCase(),
       own: 0,
       delegated: 0
     };
-  } catch (error) {
-    console.error(formatAxiosError(error, `Error fetching voting power for ${address}`));
-    throw error;
   }
+  return results[0];
 };
 
 /**
