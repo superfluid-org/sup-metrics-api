@@ -1304,70 +1304,68 @@ async function refreshHistoricalDistributionMetrics(): Promise<void> {
   saveHistoricalDistributionMetricsToDisk(payload);
 }
 
+/** Case-insensitive lookup; strategies may return checksummed keys. */
+function getScoreForAddress(scoreMap: Record<string, number>, addressLower: string): number {
+  const key = Object.keys(scoreMap ?? {}).find(k => k.toLowerCase() === addressLower);
+  return key != null ? scoreMap[key]! : 0;
+}
+
+/** Strategy names that contribute to "own" voting power (fountainhead + vsup). Must match space config. */
+const OWN_STRATEGY_NAMES = ['fountainhead', 'erc20-balance-of'] as const;
+const DELEGATION_STRATEGY_NAME = 'delegation';
+
 export const getVotingPowerBatch = async (addresses: string[], includeDelegations: boolean): Promise<VotingPower[]> => {
   const spaceConfig = await getSpaceConfig();
+  const strategies = includeDelegations
+    ? spaceConfig.strategies
+    : spaceConfig.strategies.filter(s => s.name !== DELEGATION_STRATEGY_NAME);
 
-  const strategies = includeDelegations ? 
-    spaceConfig.strategies : 
-    spaceConfig.strategies.filter(strategy => strategy.name !== "delegation");
-  
+  const chunkSize = config.vpCalcChunkSize;
+  const chunks: string[][] = [];
+  for (let i = 0; i < addresses.length; i += chunkSize) {
+    chunks.push(addresses.slice(i, i + chunkSize));
+  }
+
+  console.log(`Processing ${addresses.length} addresses in ${chunks.length} chunks of max ${chunkSize}`);
+
+  const allScores: Record<string, number>[] = strategies.map(() => ({}));
+  const provider = viemClientToEthersV5Provider(viemClient);
+
   try {
-    const chunks = [];
-    for (let i = 0; i < addresses.length; i += config.vpCalcChunkSize) {
-      chunks.push(addresses.slice(i, i + config.vpCalcChunkSize));
-    }
-    
-    console.log(`Processing ${addresses.length} addresses in ${chunks.length} chunks of max ${config.vpCalcChunkSize}`);
-    
-    // Process each chunk and combine results
-    const allScores: any[] = [{}, {}, {}]; // 0: fountainhead, 1: delegate, 2: vsup
     for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
-      process.stdout.write(`Processing chunk ${i+1}/${chunks.length} (${chunk.length} addresses)...`);
-      const startTime = Date.now();
+      const chunk = chunks[i]!;
+      process.stdout.write(`Processing chunk ${i + 1}/${chunks.length} (${chunk.length} addresses)...`);
+      const start = Date.now();
 
-      const provider = viemClientToEthersV5Provider(viemClient);
-      
       const chunkScores = await snapshotStrategies.utils.getScoresDirect(
-        config.snapshotSpace, // space
-        strategies, // strategies
-        spaceConfig.network, // network
-        provider, // provider
-        chunk, // addresses (just this chunk)
-        'latest' // snapshot?
+        config.snapshotSpace,
+        strategies,
+        spaceConfig.network,
+        provider,
+        chunk,
+        'latest'
       );
-      
-      const endTime = Date.now();
-      const duration = (endTime - startTime) / 1000;
-      console.log(` completed in ${duration.toFixed(2)}s`);
-      
-      // Merge scores from this chunk into the corresponding strategy arrays
-      chunkScores.forEach((strategyScores, strategyIndex) => {
-        Object.assign(allScores[strategyIndex], strategyScores);
+
+      console.log(` completed in ${((Date.now() - start) / 1000).toFixed(2)}s`);
+
+      chunkScores.forEach((strategyScores, idx) => {
+        Object.assign(allScores[idx]!, strategyScores);
       });
-      
-      // uncomment for debugging
-      //fs.writeFileSync(`scores_chunk_${i}.json`, JSON.stringify(chunkScores, null, 2));
     }
 
-    // uncomment for debugging
-    //fs.writeFileSync('scores.json', JSON.stringify(allScores, null, 2));
-    const scoresFountainhead = allScores[0];
-    const scoresDelegation = includeDelegations ? allScores[1] : {};
-    const scoresVsup = includeDelegations ? allScores[2] : allScores[1];
+    const scoresByStrategy = new Map<string, Record<string, number>>();
+    strategies.forEach((s, idx) => scoresByStrategy.set(s.name, allScores[idx]!));
 
-    // Process the scores according to the required format
-    const result: VotingPower[] = addresses.map(address => {
+    return addresses.map(address => {
       const addressLower = address.toLowerCase();
+      const own = OWN_STRATEGY_NAMES.reduce(
+        (sum, name) => sum + getScoreForAddress(scoresByStrategy.get(name) ?? {}, addressLower),
+        0
+      );
+      const delegated = getScoreForAddress(scoresByStrategy.get(DELEGATION_STRATEGY_NAME) ?? {}, addressLower);
 
-      return {
-        address: addressLower,
-        own: (scoresFountainhead[addressLower] || 0) + (scoresVsup[addressLower] || 0),
-        delegated: scoresDelegation[addressLower]
-      };
+      return { address: addressLower, own, delegated };
     });
-
-    return result;
   } catch (error) {
     console.error(formatAxiosError(error, 'Error fetching voting power for batch'));
     throw error;
