@@ -14,7 +14,7 @@
     "swagger": "tsoa spec-and-routes"
   },
   "dependencies": {
-    "@d10r/snapshot-strategies": "^0.1.4",
+    "@d10r/snapshot-strategies": "^0.1.5",
     "@ethersproject/providers": "^5.6.8",
     "@snapshot-labs/snapshot.js": "^0.12.61",
     "axios": "^1.7.9",
