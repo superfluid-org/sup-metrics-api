@@ -396,6 +396,13 @@ export const getDistributionMetrics = (): DistributionMetricsResponse => {
   };
 };
 
+export const getLastUpdatedTimestamps = (): Record<string, number> => {
+  return {
+    voting_metrics: votingMetricsManager.getData().lastUpdatedAt,
+    distribution_metrics: distributionMetricsManager.getData().lastUpdatedAt,
+  };
+};
+
 // Function to get investors and team addresses from vesting schedules
 async function getInvestorsAndTeamAddresses(): Promise<string[]> {
   // Step 1: Get vesting sender contracts from transfer events
