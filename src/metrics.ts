@@ -47,6 +47,13 @@ const HISTORY_FILE_PATH = path.join(DATA_DIR, HISTORY_FILE_NAME);
 const baseBlockNumberCache = new Map<number, bigint>();
 const ethereumBlockNumberCache = new Map<number, bigint>();
 const VESTING_FACTORY_DEPLOYMENT_BLOCK = 33631769n;
+const LOCKER_OWNER_BATCH_SIZE = 500;
+
+const chunkArray = <T>(items: readonly T[], chunkSize: number): T[][] =>
+  Array.from(
+    { length: Math.ceil(items.length / chunkSize) },
+    (_, index) => items.slice(index * chunkSize, (index + 1) * chunkSize)
+  );
 
 // Setup viem client with batching support
 const viemClient = createPublicClient({
@@ -1601,40 +1608,40 @@ async function fetchVotingMetrics(): Promise<Record<string, MemberData>> {
       );
       console.log(`Found ${poolMembers.length} pool members for pool ${poolId}, now getting owners...`);
       
-      // Get owners for each locker
-      const ownerPromises = poolMembers.map(locker => 
-        viemClient.readContract({
-          address: locker as Address,
-          abi: LOCKER_ABI,
-          functionName: 'lockerOwner',
-          args: []
-        }).catch(error => {
-          // this is allowed to fail because it's possible to have pool members that are not lockers
-          return { error: true, address: locker, errorMessage: error.message };
-        })
-      );
-        
-      const results = await Promise.allSettled(ownerPromises);
-      console.log(`Found ${results.length} owners for pool ${poolId}`);
-      
-      // Collect failed addresses for summary logging
       const failedAddresses: string[] = [];
-      
-      for (let i = 0; i < results.length; i++) {
-        const result = results[i];
-        if (result.status === 'fulfilled') {
-          if (result.value && typeof result.value === 'object' && 'error' in result.value) {
-            // This is an error result
-            failedAddresses.push(result.value.address);
-          } else if (result.value !== null) {
-            // This is a successful result
-            const owner = result.value as Address;
-            const lockerAddress = poolMembers[i];
-            lockerToOwnerMap.set(lockerAddress.toLowerCase(), owner.toLowerCase());
-            uniqueAccounts.add(owner.toLowerCase());
+      const lockerBatches = chunkArray(poolMembers, LOCKER_OWNER_BATCH_SIZE);
+
+      for (const lockerBatch of lockerBatches) {
+        const ownerResults = await Promise.all(
+          lockerBatch.map(async locker => {
+            try {
+              const owner = await viemClient.readContract({
+                address: locker as Address,
+                abi: LOCKER_ABI,
+                functionName: 'lockerOwner',
+                args: []
+              });
+
+              return { locker, owner: (owner as Address).toLowerCase() };
+            } catch {
+              // This is allowed to fail because it's possible to have pool members that are not lockers.
+              return { locker, error: true as const };
+            }
+          })
+        );
+
+        ownerResults.forEach(result => {
+          if ('error' in result) {
+            failedAddresses.push(result.locker);
+            return;
           }
-        }
+
+          lockerToOwnerMap.set(result.locker.toLowerCase(), result.owner);
+          uniqueAccounts.add(result.owner);
+        });
       }
+
+      console.log(`Found ${poolMembers.length} owners for pool ${poolId}`);
       
       // Print summary of failed addresses if any
       if (failedAddresses.length > 0) {
@@ -1675,6 +1682,7 @@ async function fetchVotingMetrics(): Promise<Record<string, MemberData>> {
     const uniqueAccountsArray = Array.from(uniqueAccounts);
     console.log(`Fetching own voting power for ${uniqueAccountsArray.length} accounts...`);
     const ownVotingPowers = await getVotingPowerBatch(uniqueAccountsArray, false);
+    const ownVotingPowerByAddress = new Map(ownVotingPowers.map(vp => [vp.address, vp]));
 
     // 4. Calculate delegated voting power
     const delegatedVotingPower = new Map<string, number>();
@@ -1684,8 +1692,8 @@ async function fetchVotingMetrics(): Promise<Record<string, MemberData>> {
       const delegator = delegation.delegator.toLowerCase();
       const delegate = delegation.delegate.toLowerCase();
       
-      // Find delegator's own voting power
-      const delegatorVp = ownVotingPowers.find(vp => vp.address === delegator);
+      // Look up the delegator's own voting power in O(1).
+      const delegatorVp = ownVotingPowerByAddress.get(delegator);
       if (delegatorVp) {
         // Add delegator's voting power to delegate's total
         const currentDelegatedVp = delegatedVotingPower.get(delegate) || 0;
@@ -1699,17 +1707,18 @@ async function fetchVotingMetrics(): Promise<Record<string, MemberData>> {
 
     // 5. Compile final data structure
     const data: Record<string, MemberData> = {};
+    const lockerByOwner = new Map<string, string>();
+
+    for (const [lockerAddress, owner] of lockerToOwnerMap.entries()) {
+      // Preserve the first locker encountered for an owner, matching the previous loop's behavior.
+      if (!lockerByOwner.has(owner)) {
+        lockerByOwner.set(owner, lockerAddress);
+      }
+    }
     
     // Process voting powers
     for (const vp of ownVotingPowers) {
-      // Find the locker for this account by searching the lockerToOwnerMap
-      let locker: string | undefined;
-      for (const [lockerAddress, owner] of lockerToOwnerMap.entries()) {
-        if (owner === vp.address) {
-          locker = lockerAddress;
-          break;
-        }
-      }
+      const locker = lockerByOwner.get(vp.address);
       
       const memberData: MemberData = {
         ownVp: vp.own,
