@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { postSubgraphGraphql, type GraphqlPayload } from './subgraphFixture';
 import { Client, Chain, Transport } from 'viem';
 import * as ethersProviders from '@ethersproject/providers';
 
@@ -105,7 +106,7 @@ export async function queryAllPages<T>(
   const pageSize = 1000;
 
   while (true) {
-    const response = await axios.post(graphqlEndpoint, {
+    const response = await postSubgraphGraphql<GraphqlPayload>(graphqlEndpoint, {
       query: queryFn(lastId)
     });
 

@@ -54,6 +54,18 @@ export const config = {
   distributionMetrics2UpdateInterval: parseInt(process.env.DISTRIBUTION_METRICS_2_UPDATE_INTERVAL || '86400', 10),
   distributionMetricsHistorySnapshotSpacing: parseInt(process.env.DISTRIBUTION_METRICS_HISTORY_SNAPSHOT_SPACING || '604800', 10), // 1 week
   vpCalcChunkSize: parseInt(process.env.VP_CALC_CHUNK_SIZE || '5000', 10),
+
+  /** off | record | replay — only affects Superfluid / SUP / vesting / delegation subgraph GraphQL POSTs */
+  subgraphFixtureMode: ((): 'off' | 'record' | 'replay' => {
+    const v = (process.env.SUBGRAPH_FIXTURE_MODE || 'off').toLowerCase();
+    return v === 'record' || v === 'replay' ? v : 'off';
+  })(),
+  /** off | record | replay — affects getScoresDirect chunk results */
+  snapshotScoreFixtureMode: ((): 'off' | 'record' | 'replay' => {
+    const v = (process.env.SNAPSHOT_SCORE_FIXTURE_MODE || 'off').toLowerCase();
+    return v === 'record' || v === 'replay' ? v : 'off';
+  })(),
+  metricsFixtureDir: process.env.METRICS_FIXTURE_DIR || './.cache/metrics-fixtures',
 }; 
 
 export type AppConfig = typeof config;

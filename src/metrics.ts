@@ -20,7 +20,6 @@ import {
   CirculatingSupplyResponse
 } from './types'; 
 import snapshot from '@snapshot-labs/snapshot.js';
-import snapshotStrategies from '@d10r/snapshot-strategies';
 import { createPublicClient, http, Address, erc20Abi } from 'viem';
 import { formatUnits } from 'viem';
 import { base, mainnet } from 'viem/chains'
@@ -35,6 +34,8 @@ import {
   BASE_BLOCK_TIME_SECONDS,
   ETHEREUM_BLOCK_TIME_SECONDS
 } from './utils';
+import { postSubgraphGraphql, type GraphqlPayload } from './subgraphFixture';
+import { getScoresDirect } from './snapshot-score-wrapper';
 
 // File paths for metric data
 const DATA_DIR = './data';
@@ -600,7 +601,7 @@ async function getInvestorsAndTeamAddresses(): Promise<string[]> {
     }
   `;
 
-  const response = await axios.post(config.sfSubgraphUrl, { query });
+  const response = await postSubgraphGraphql<GraphqlPayload>(config.sfSubgraphUrl, { query });
   const transferEvents = response.data.data.transferEvents;
   
   // Extract unique addresses from transfer instantUnlockEvents
@@ -1337,7 +1338,7 @@ export const getVotingPowerBatch = async (addresses: string[], includeDelegation
       process.stdout.write(`Processing chunk ${i + 1}/${chunks.length} (${chunk.length} addresses)...`);
       const start = Date.now();
 
-      const chunkScores = await snapshotStrategies.utils.getScoresDirect(
+      const chunkScores = await getScoresDirect(
         config.snapshotSpace,
         strategies,
         spaceConfig.network,
@@ -1435,7 +1436,7 @@ export const getDelegateForUser = async (address: string): Promise<string | null
 
   try {
     const subgraphUrl = `https://gateway.thegraph.com/api/${config.graphNetworkApiKey}/subgraphs/id/${config.delegationSubgraphId}`;
-    const response = await axios.post(subgraphUrl, { query });
+    const response = await postSubgraphGraphql<GraphqlPayload>(subgraphUrl, { query });
 
     const delegations = response.data.data.delegations;
     return delegations.length > 0 ? delegations[0].delegate : null;
@@ -1468,7 +1469,7 @@ export const getTotalScore = async (): Promise<TotalScoreResponse> => {
       }
     `;
 
-    const response = await axios.post(config.sfSubgraphUrl, { query });
+    const response = await postSubgraphGraphql<GraphqlPayload>(config.sfSubgraphUrl, { query });
     const instantUnlockEvents = response.data.data.flowDistributionUpdatedEvents;
     
     console.log(`Found ${instantUnlockEvents.length} flow distribution instantUnlockEvents`);
@@ -1541,7 +1542,7 @@ async function fetchVotingMetrics(): Promise<Record<string, MemberData>> {
       }
     `;
 
-    const response = await axios.post(config.sfSubgraphUrl, { query });
+    const response = await postSubgraphGraphql<GraphqlPayload>(config.sfSubgraphUrl, { query });
     const instantUnlockEvents = response.data.data.flowDistributionUpdatedEvents;
     
     console.log(`Found ${instantUnlockEvents.length} flow distribution instantUnlockEvents`);

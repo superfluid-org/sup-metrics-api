@@ -3,3 +3,5 @@ src/routes.ts
 .env
 dist/
 node_modules/
+.cache/
+data/
